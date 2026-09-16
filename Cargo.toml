@@ -1,0 +1,29 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/rproxy-core",
+    "crates/rproxy-cli",
+    "crates/rproxy-gui",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+hyper = { version = "1", features = ["full"] }
+hyper-util = { version = "0.1", features = ["full"] }
+http-body-util = "0.1"
+http = "1"
+bytes = "1"
+futures-util = "0.3"
+async-trait = "0.1"
+clap = { version = "4", features = ["derive"] }
+eframe = "0.29"
+egui = "0.29"
+
+[profile.release]
+lto = "thin"
+

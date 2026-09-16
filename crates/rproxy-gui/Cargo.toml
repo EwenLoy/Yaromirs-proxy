@@ -1,0 +1,10 @@
+[package]
+name = "rproxy-gui"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rproxy-core = { path = "../rproxy-core" }
+eframe.workspace = true
+egui.workspace = true
+tokio.workspace = true

@@ -1,0 +1,12 @@
+# Rust
+/target
+**/*.rs.bk
+
+# IDE
+.vscode/
+.idea/
+
+# Временные артефакты
+*.log
+build_out.txt
+help_out.txt
