@@ -1,0 +1,11 @@
+[package]
+name = "rproxy-cert"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rcgen.workspace = true
+rustls.workspace = true
+rustls-pemfile.workspace = true
+rustls-pki-types.workspace = true
+time.workspace = true

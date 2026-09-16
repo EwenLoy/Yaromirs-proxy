@@ -2,8 +2,7 @@
 //! M0/M2: `rproxy run --port 8888` — forward proxy с построчным логом exchanges.
 
 use clap::Parser;
-use rproxy_core::pipeline::Pipeline;
-use rproxy_core::{EventBus, ProxyEvent, ProxyServer};
+use rproxy_core::{EventBus, ProxyEvent, ProxyServer, pipeline::Pipeline};
 
 #[derive(Parser, Debug)]
 #[command(name = "rproxy", version, about = "Открытый аналог Charles Proxy (M0)")]
@@ -23,7 +22,7 @@ async fn main() -> anyhow::Result<()> {
 
     let bus = EventBus::new();
     let pipeline = Pipeline::new();
-    let server = ProxyServer::new(bus.clone(), pipeline);
+    let server = ProxyServer::new(bus.clone(), pipeline).with_mitm();
 
     // Подписчик: построчный лог exchanges в stdout.
     let mut events = bus.subscribe();

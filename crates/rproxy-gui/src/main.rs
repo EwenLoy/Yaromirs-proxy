@@ -38,7 +38,8 @@ fn main() -> eframe::Result<()> {
                         }
                     }
                 });
-                let server = ProxyServer::new(bus_for_server, rproxy_core::Pipeline::new());
+                let server = ProxyServer::new(bus_for_server, rproxy_core::Pipeline::new())
+                    .with_mitm();
                 let addr = format!("127.0.0.1:{port}");
                 eprintln!("[rproxy-gui] proxy listening on http://{addr} (HTTP forward + CONNECT)");
                 if let Err(e) = server.run(&addr).await {
@@ -131,13 +132,15 @@ impl ExchangeRow {
             }
             Some(req) => {
                 let rest = req.uri.as_str();
-                let (host, path) = if let Some(rest) = rest.strip_prefix("http://") {
-                    match rest.split_once('/') {
+                let (host, path) = match rest
+                    .strip_prefix("https://")
+                    .or_else(|| rest.strip_prefix("http://"))
+                {
+                    Some(rest) => match rest.split_once('/') {
                         Some((h, p)) => (h.to_string(), format!("/{p}")),
                         None => (rest.to_string(), "/".to_string()),
-                    }
-                } else {
-                    (rest.to_string(), "/".to_string())
+                    },
+                    None => (rest.to_string(), "/".to_string()),
                 };
                 (req.method.clone(), host, path, false)
             }
@@ -364,7 +367,7 @@ impl RProxyApp {
                 ui.label(format!("{} requests", self.rows.len()));
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.weak("rproxy v0.1.0 (M0: HTTP forward + CONNECT passthrough)");
+                    ui.weak("rproxy v0.1.0 (M1: MITM HTTPS decryption, HTTP forward)");
                 });
             });
         });

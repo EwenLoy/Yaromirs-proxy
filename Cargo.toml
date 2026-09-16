@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/rproxy-core",
+    "crates/rproxy-cert",
     "crates/rproxy-cli",
     "crates/rproxy-gui",
 ]
@@ -23,6 +24,12 @@ async-trait = "0.1"
 clap = { version = "4", features = ["derive"] }
 eframe = "0.29"
 egui = "0.29"
+rcgen = { version = "0.14", features = ["pem", "x509-parser"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-pemfile = "2"
+rustls-pki-types = "1"
+tokio-rustls = "0.26"
+time = "0.3"
 
 [profile.release]
 lto = "thin"
