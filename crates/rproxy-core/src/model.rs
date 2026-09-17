@@ -101,7 +101,14 @@ pub struct Exchange {
     pub state: ExchangeState,
     pub request: Option<HttpRequest>,
     pub response_status: Option<u16>,
+    pub response_headers: Vec<(String, String)>,
+    pub response_content_type: Option<String>,
+    pub request_body: Option<bytes::Bytes>,
+    pub response_body: Option<bytes::Bytes>,
+    /// Расшифрованное (gzip/deflate) тело ответа, если применимо.
+    pub response_body_decoded: Option<bytes::Bytes>,
     pub timing: Timing,
+    pub started_wall: Option<std::time::SystemTime>,
     pub error: Option<String>,
 }
 
@@ -114,8 +121,18 @@ impl Exchange {
             state: ExchangeState::InProgress,
             request: None,
             response_status: None,
+            response_headers: Vec::new(),
+            response_content_type: None,
+            request_body: None,
+            response_body: None,
+            response_body_decoded: None,
             timing: Timing::start(),
+            started_wall: Some(std::time::SystemTime::now()),
             error: None,
         }
     }
 }
+
+/// Лимит буферизации тела (байты) — сверх этого тело не сохраняется.
+pub const BODY_CAPTURE_LIMIT: usize = 16 * 1024 * 1024;
+

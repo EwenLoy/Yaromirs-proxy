@@ -259,6 +259,60 @@ fn empty_response(status: u16) -> HyperResponse {
         .unwrap()
 }
 
+/// Буферизуем тело с лимитом. Возвращает (байты, обрезано_ли).
+async fn capture_body(body: Incoming) -> (Bytes, bool) {
+    use http_body_util::BodyExt;
+    let limited = http_body_util::Limited::new(body, crate::model::BODY_CAPTURE_LIMIT);
+    match limited.collect().await {
+        Ok(c) => (c.to_bytes(), false),
+        Err(_) => (Bytes::new(), true), // превысили лимит
+    }
+}
+
+/// Распаковка gzip/deflate для отображения.
+fn decode_body(headers: &[(String, String)], raw: &[u8]) -> Option<Bytes> {
+    let enc = headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("content-encoding"))
+        .map(|(_, v)| v.to_ascii_lowercase())?;
+    let out: Option<Vec<u8>> = if enc.contains("gzip") {
+        use std::io::Read;
+        let mut d = flate2::read::MultiGzDecoder::new(raw);
+        let mut v = Vec::new();
+        d.read_to_end(&mut v).ok().map(|_| v)
+    } else if enc.contains("deflate") {
+        use std::io::Read;
+        let mut d = flate2::read::ZlibDecoder::new(raw);
+        let mut v = Vec::new();
+        d.read_to_end(&mut v).ok().map(|_| v)
+    } else {
+        None
+    };
+    out.map(Bytes::from)
+}
+
+fn content_type_of(headers: &[(String, String)]) -> Option<String> {
+    headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+        .map(|(_, v)| v.clone())
+}
+
+/// Записывает в exchange метаданные ответа + тело, публикует Completed.
+fn finish_with_response(state: &ProxyState, mut exchange: Exchange, rparts: &http::response::Parts, body: Bytes) {
+    exchange.response_status = Some(rparts.status.as_u16());
+    exchange.response_headers = rparts
+        .headers
+        .iter()
+        .map(|(k, v)| (k.as_str().into(), v.to_str().unwrap_or("").into()))
+        .collect();
+    exchange.response_content_type = content_type_of(&exchange.response_headers);
+    exchange.response_body = Some(body.clone());
+    exchange.response_body_decoded = decode_body(&exchange.response_headers, &body);
+    finish_exchange(state, exchange, ExchangeState::Complete);
+}
+
+
 fn finish_exchange(state: &ProxyState, mut exchange: Exchange, state_: ExchangeState) {
     exchange.state = state_;
     exchange.timing.completed_at = Some(Instant::now());
@@ -394,19 +448,39 @@ async fn handle_forward(
         InterceptAction::Continue => {}
     }
 
+    // Буферизуем тело запроса (лимит BODY_CAPTURE_LIMIT).
+    let (req_parts, req_body_in) = req.into_parts();
+    let (req_bytes, _trunc) = capture_body(req_body_in).await;
+    exchange.request_body = Some(req_bytes.clone());
+    state.bus.publish(ProxyEvent::ExchangeUpdated(exchange.clone()));
+
     // Форвардинг: absolute-URI сохраняется; коннектор резолвит host из URI.
-    let client: Client<HttpConnector, Incoming> =
+    let client: Client<HttpConnector, Full<Bytes>> =
         Client::builder(TokioExecutor::new()).build_http();
 
-    let result = client.request(req).await;
+    let mut builder = http::Request::builder()
+        .method(req_parts.method.clone())
+        .uri(req_parts.uri.clone());
+    for (k, v) in req_parts.headers.iter() {
+        builder = builder.header(k, v);
+    }
+    let outgoing = match builder.body(Full::new(req_bytes)) {
+        Ok(r) => r,
+        Err(e) => {
+            exchange.error = Some(format!("rebuild request: {e}"));
+            finish_exchange(&state, exchange, ExchangeState::Failed);
+            return Ok(empty_response(502));
+        }
+    };
+
+    let result = client.request(outgoing).await;
 
     match result {
         Ok(resp) => {
-            exchange.response_status = Some(resp.status().as_u16());
-            let (parts, body) = resp.into_parts();
-            // Тело отдаём потоково, без буферизации.
-            let response = http::Response::from_parts(parts, Either::Left(body));
-            finish_exchange(&state, exchange, ExchangeState::Complete);
+            let (rparts, rbody) = resp.into_parts();
+            let (resp_bytes, _) = capture_body(rbody).await;
+            let response = http::Response::from_parts(rparts.clone(), Either::Right(Full::new(resp_bytes.clone())));
+            finish_with_response(&state, exchange, &rparts, resp_bytes);
             Ok(response)
         }
         Err(e) => {
@@ -544,6 +618,12 @@ async fn forward_https_decrypted(
         return Ok(empty_response(status));
     }
 
+    // Буферизуем тело запроса.
+    let (mut parts, body_in) = req.into_parts();
+    let (req_bytes, _) = capture_body(body_in).await;
+    exchange.request_body = Some(req_bytes.clone());
+    state.bus.publish(ProxyEvent::ExchangeUpdated(exchange.clone()));
+
     // Origin: host:port из authority (порт по умолчанию 443).
     let (host, port) = match authority.rsplit_once(':') {
         Some((h, p)) => (h.to_string(), p.parse().unwrap_or(443u16)),
@@ -589,23 +669,22 @@ async fn forward_https_decrypted(
     });
 
     // origin-form запрос: path-only URI + Host.
-    let (mut parts, body) = req.into_parts();
     parts.uri = path.parse::<http::Uri>().expect("valid path_and_query");
     if let Ok(host_hdr) = http::HeaderValue::from_str(&authority) {
         parts.headers.insert(http::header::HOST, host_hdr);
     }
     parts.headers.remove("proxy-connection");
     parts.headers.remove("proxy-authorization");
-    let outgoing = http::Request::from_parts(parts, body);
+    let outgoing = http::Request::from_parts(parts, Full::new(req_bytes));
 
     let result = sender.send_request(outgoing).await;
 
     match result {
         Ok(resp) => {
-            exchange.response_status = Some(resp.status().as_u16());
-            let (parts, body) = resp.into_parts();
-            let response = http::Response::from_parts(parts, Either::Left(body));
-            finish_exchange(&state, exchange, ExchangeState::Complete);
+            let (rparts, rbody) = resp.into_parts();
+            let (resp_bytes, _) = capture_body(rbody).await;
+            let response = http::Response::from_parts(rparts.clone(), Either::Right(Full::new(resp_bytes.clone())));
+            finish_with_response(&state, exchange, &rparts, resp_bytes);
             Ok(response)
         }
         Err(e) => {

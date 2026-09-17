@@ -54,6 +54,9 @@ struct Row {
     status: u16,
     time: String,
     duration: String,
+    req_body: Option<String>,
+    resp_body: Option<String>,
+    content_type: Option<String>,
 }
 
 #[derive(Clone)]
@@ -76,6 +79,7 @@ struct App {
     sel_row: Option<u32>,
     rows: Vec<Row>,
     hosts: Vec<Host>,
+    exchanges: Vec<rproxy_core::Exchange>,
     about: bool,
     rx: Receiver<rproxy_core::Exchange>,
 }
@@ -87,6 +91,19 @@ fn now_str() -> String {
 }
 
 impl Row {
+    fn body_str(b: &Option<bytes::Bytes>) -> Option<String> {
+        b.as_ref().and_then(|b| {
+            if b.is_empty() {
+                None
+            } else {
+                Some(match std::str::from_utf8(b) {
+                    Ok(s) => s.to_string(),
+                    Err(_) => format!("[binary, {} bytes]", b.len()),
+                })
+            }
+        })
+    }
+
     fn from(ex: &rproxy_core::Exchange) -> Self {
         let (method, host, path, locked) = match &ex.request {
             Some(r) if r.is_connect => ("CONNECT".into(), r.uri.clone(), "*".into(), true),
@@ -102,6 +119,7 @@ impl Row {
             }
             None => ("-".into(), "-".into(), "-".into(), false),
         };
+        let resp = ex.response_body_decoded.as_ref().or(ex.response_body.as_ref());
         Self {
             id: ex.id.0 as u32,
             locked,
@@ -111,7 +129,22 @@ impl Row {
             status: ex.response_status.unwrap_or(0),
             time: now_str(),
             duration: ex.timing.total().map(|d| format!("{d:.1?}")).unwrap_or_else(|| "-".into()),
+            req_body: Self::body_str(&ex.request_body),
+            resp_body: resp.cloned().and_then(|b| Self::body_str(&Some(b))),
+            content_type: ex.response_content_type.clone(),
         }
+    }
+
+    fn pretty_body(body: &Option<String>, content_type: &Option<String>) -> String {
+        let Some(text) = body else { return "(пусто)".into() };
+        if content_type.as_deref().map_or(false, |ct| ct.contains("json")) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(text) {
+                if let Ok(pretty) = serde_json::to_string_pretty(&v) {
+                    return pretty;
+                }
+            }
+        }
+        text.clone()
     }
     fn url(&self) -> String {
         format!("{}://{}{}", if self.locked { "https" } else { "http" }, self.host, self.path)
@@ -123,7 +156,7 @@ impl App {
         Self {
             port, recording: true, ssl_hint: true, filter: String::new(), sel_host: None,
             tab: Tab::Overview, sel_row: None, rows: Vec::new(), hosts: Vec::new(),
-            about: false, rx,
+            exchanges: Vec::new(), about: false, rx,
         }
     }
 
@@ -131,6 +164,7 @@ impl App {
         while let Ok(ex) = self.rx.try_recv() {
             if self.recording {
                 self.rows.push(Row::from(&ex));
+                self.exchanges.push(ex);
             }
         }
         self.hosts.clear();
@@ -185,8 +219,22 @@ impl App {
                 ui.menu_button("File", |ui| {
                     if ui.button("Clear Session").clicked() {
                         self.rows.clear();
+                        self.exchanges.clear();
                         self.sel_row = None;
                         self.sel_host = None;
+                        ui.close_menu();
+                    }
+                    if ui.button("Save session as HAR…").clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("HAR", &["har"])
+                            .set_file_name("session.har")
+                            .save_file()
+                        {
+                            match rproxy_export::write_har(&path, &self.exchanges) {
+                                Ok(()) => println!("[rproxy] HAR сохранён: {}", path.display()),
+                                Err(e) => eprintln!("[rproxy] HAR save failed: {e}"),
+                            }
+                        }
                         ui.close_menu();
                     }
                     if ui.button("Quit").clicked() {
@@ -375,11 +423,18 @@ impl App {
             Tab::Request => {
                 ui.monospace(format!("{} {} HTTP/1.1", r.method, r.path));
                 ui.monospace(format!("Host: {}", r.host));
-                ui.weak("(тела запросов появятся при захвате тела в ядре)");
+                ui.separator();
+                ui.weak("Body:");
+                ui.monospace(Row::pretty_body(&r.req_body, &None));
             }
             Tab::Response => {
                 ui.monospace(format!("HTTP/1.1 {}", r.status));
-                ui.weak("(тела ответов появятся при захвате тела в ядре)");
+                if let Some(ct) = &r.content_type {
+                    ui.weak(format!("Content-Type: {ct}"));
+                }
+                ui.separator();
+                ui.weak("Body:");
+                ui.monospace(Row::pretty_body(&r.resp_body, &r.content_type));
             }
             Tab::Timing => {
                 ui.monospace(format!("Total: {}", r.duration));

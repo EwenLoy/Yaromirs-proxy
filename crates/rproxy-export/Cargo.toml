@@ -1,0 +1,15 @@
+[package]
+name = "rproxy-export"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rproxy-core = { path = "../rproxy-core" }
+serde_json.workspace = true
+bytes.workspace = true
+time = { workspace = true, features = ["formatting", "macros"] }
+
+[dev-dependencies]
+serde_json.workspace = true
+bytes.workspace = true
+

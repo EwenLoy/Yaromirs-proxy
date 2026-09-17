@@ -6,6 +6,10 @@ edition.workspace = true
 [dependencies]
 rproxy-core = { path = "../rproxy-core" }
 rproxy-cert = { path = "../rproxy-cert" }
+rproxy-export = { path = "../rproxy-export" }
 eframe.workspace = true
 egui.workspace = true
 tokio.workspace = true
+rfd = "0.15"
+bytes.workspace = true
+serde_json.workspace = true

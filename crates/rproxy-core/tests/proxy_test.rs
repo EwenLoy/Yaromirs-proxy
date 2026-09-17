@@ -123,6 +123,15 @@ async fn forward_proxy_request_works() {
                 assert_eq!(ex.protocol, rproxy_core::Protocol::Http1);
                 assert_eq!(ex.response_status, Some(200));
                 assert_eq!(ex.state, rproxy_core::ExchangeState::Complete);
+                // M2: тела захвачены
+                assert_eq!(
+                    ex.request_body.as_deref(),
+                    Some(b"".as_slice())
+                );
+                assert_eq!(
+                    ex.response_body.as_deref(),
+                    Some(b"origin reply for /hello".as_slice())
+                );
                 completed = true;
                 break;
             }
