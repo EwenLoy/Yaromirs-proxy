@@ -3053,6 +3053,7 @@ version = "0.1.0"
 dependencies = [
  "eframe",
  "egui",
+ "rproxy-cert",
  "rproxy-core",
  "tokio",
 ]
