@@ -275,12 +275,21 @@ impl eframe::App for App {
             self.install_window(ctx);
         }
         if self.about {
-            egui::Window::new("About rproxy").collapsible(false).show(ctx, |ui| {
-                ui.label(RichText::new("rproxy").heading());
-                ui.label("Open-source web debugging proxy (Charles Proxy alternative)");
-                ui.label(format!("Proxy: http://127.0.0.1:{}", self.port));
-                ui.label("MITM HTTPS: enabled (CA in %USERPROFILE%\\.rproxy\\ca.cert.pem)");
-            });
+            let mut open = self.about;
+            egui::Window::new("About rproxy")
+                .collapsible(false)
+                .open(&mut open)
+                .show(ctx, |ui| {
+                    ui.label(RichText::new("rproxy").heading());
+                    ui.label("Open-source web debugging proxy (Charles Proxy alternative)");
+                    ui.label(format!("Proxy: http://127.0.0.1:{}", self.port));
+                    ui.label("MITM HTTPS: enabled (CA in %USERPROFILE%\\.rproxy\\ca.cert.pem)");
+                    ui.add_space(6.0);
+                    if ui.button("Close").clicked() {
+                        open = false;
+                    }
+                });
+            self.about = open;
         }
         if !self.pending_bp.is_empty() || self.bp_on {
             self.breakpoints_window(ctx);
