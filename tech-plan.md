@@ -1,9 +1,15 @@
 # Тех. план: открытый аналог Charles Proxy на Rust (egui + CLI)
 
-Кодовое имя проекта: **rproxy** (заменить на своё).
+Кодовое имя проекта: **rproxy** (репо: Yaromirs-proxy).
 
-Базируется на анализе актуальной версии Charles Proxy **5.2.1** (август 2026) —
-полный список её возможностей ниже, и на его основе выстроен план разработки.
+> **Статус (17.09.2026):** M0 ✅ и M1 ✅ выполнены.
+> Работает: HTTP/1.1 forward proxy, CONNECT passthrough и MITM-расшифровка HTTPS
+> (rcgen root CA в `~/.rproxy`, leaf-сертификаты per-host), event bus, interceptor-pipeline,
+> CLI `rproxy run`, live GUI (Charles-style: дерево хостов с Encrypted-группой, фильтр,
+> таблица Sequence, детали). Тесты: 5/5 (forward, CONNECT, pipeline ShortCircuit, CA/leaf, MITM e2e).
+
+Базируется на анализе актуальной версии Charles Proxy **5.2.1** и на
+конкурентном анализе Proxyman (актуальная версия с MCP) — см. §2.1.
 
 ---
 
@@ -95,6 +101,33 @@ Charles сейчас предоставляет line-мод и небольшо�
 - PCAP import (можно добавить позже через `pcap`/`pnet`)
 - Client Process tool (платформозависимо, сложно, низкий приоритет)
 - Импорт Fiddler SAZ
+
+### 2.1 Конкурентный анализ (сентябрь 2026) — что изменилось
+
+**Proxyman** (6.x):
+- Добавил **нативный MCP v2** — это флагманская фича. MCP HTTP-сервер внутри приложения
+  + stdio-сервер для агентов; поддержаны Claude Code, Codex, Cursor.
+  Агент может: читать/фильтровать захваченный трафик, создавать Breakpoints / Map Local /
+  Map Remote / Rewrite-скрипты, включать SSL proxying, ставить root CA, экспортировать cURL,
+  генерировать код из запроса (18+ языков), создавать Reverse Proxy / DNS Spoofing.
+  Есть SKILL.md для агентов, token-auth, автоматическое редактирование секретов в ответах.
+- **Python capture** — 1-click терминал, перехватывающий HTTPS из
+  requests/aiohttp/httpx/urllib3. JS-скриптинг с npm-аддонами. Windows/Linux версии.
+- Ограничение: MCP привязан к **открытому десктоп-приложению** ("Keep Proxyman open"),
+  и по сути это macOS-first продукт.
+
+**Charles 5.2.1**:
+- **Официального MCP нет**. AI-фич нет. Есть сторонний `charles-mcp` (PyPI, ~300★),
+  который подключается к запущенному Charles-приложению — народный проект, не вендор.
+- CLI остаётся вспомогательным слоем над GUI (см. §1.5).
+
+**Вывод для rproxy:**
+1. «AI-агент управляет прокси» — уже **table stakes** ниши, а не фишка.
+2. Уязвимое место обоих конкурентов — привязка к открытому GUI-приложению.
+   Наш архитектурный принцип (headless daemon + много клиентов, §3.1) бьёт точно туда:
+   **rproxy может быть MCP-сервером без GUI вообще** — в CI, Docker, на сервере.
+3. Позиционирование: *«the first proxy built for AI agents and CI — headless by design»*.
+   Поэтому в roadmap добавлен этап **M2.5 — MCP-сервер** (§9).
 
 ---
 
@@ -336,40 +369,54 @@ rproxy replay session.rpz --repeat 5 --delay 200ms           # аналог Repe
 
 ---
 
-## 9. Порядок разработки (roadmap)
+## 9. Порядок разработки (roadmap) — актуальная редакция
 
-**M0 — Ядро прокси (без MITM)**
-- CONNECT tunnel passthrough, HTTP/1.1 forward proxy, базовая модель Exchange, event bus
+**M0 — Ядро прокси (без MITM)** ✅ done
+- CONNECT tunnel passthrough, HTTP/1.1 forward proxy, базовая модель Exchange, event bus ✅
 
-**M1 — MITM + сертификаты**
-- rcgen root CA, динамические leaf-сертификаты, полноценный HTTPS-перехват, TLS info
+**M1 — MITM + сертификаты** ✅ done
+- rcgen root CA (persist в `~/.rproxy`), динамические leaf-сертификаты по host,
+  TLS-терминация в CONNECT (rustls), расшифрованные HTTPS-запросы в шине и GUI ✅
 
-**M2 — CLI daemon-режим**
-- `rproxy run`, логирование, экспорт HAR, `cert install/export`
+**M2 — Захват тел + HAR** ⏳ в работе
+- Буферизация тел запросов/ответов (с лимитами, большие — на диск), распаковка
+  gzip/deflate/br для отображения
+- Viewers в GUI: реальные Request/Response bodies, JSON pretty
+- Экспорт HAR; `rproxy run --record session.rpz` (формат .rpz = zip+JSON)
+
+**M2.5 — MCP-сервер** ⏳ (новый этап, см. §2.1)
+- `rproxy run --mcp`: stdio JSON-RPC (MCP) поверх daemon — headless, без GUI
+- Тулы первой волны: `get_flows` (список/фильтр), `get_flow` (детали+тело),
+  `export_flow_curl`, `toggle_recording`, `clear_session`, `get_status`
+- Каждый последующий тул ядра (M3-M6) автоматически получает MCP-обёртку
+- Дифференциатор: агент управляет прокси в CI/Docker/SSH — без открытого GUI
+  (что невозможно ни в Proxyman, ни в Charles)
+- Позже: SKILL.md, ресурсы/промпты, redaction секретов (как у Proxyman v2)
 
 **M3 — Базовые тулы**
 - Block List, No Caching, Block Cookies, Map Local, Map Remote, Rewrite
+- (каждый = interceptor + конфиг TOML + опция в CLI + MCP-тул)
 
 **M4 — GUI MVP**
-- Structure/Sequence view, просмотр Request/Response, JSON/XML/raw viewer, live-обновление
+- Полные viewers тел (JSON tree, raw, hex), поиск по сессии, Highlight Rules
 
 **M5 — TUI**
-- `ratatui` интерфейс с той же функциональностью, что и GUI-таблица
+- `ratatui` интерфейс: таблица, детали, breakpoints через `$EDITOR`
 
 **M6 — Breakpoints + Compose + Repeat**
-- Интерактивная пауза/редактирование, ручная сборка запроса, повтор
+- `InterceptAction::Hold` + канал решения оператора (GUI/TUI/MCP: `approve_flow`)
 
 **M7 — HTTP/2, WebSocket полноценно**
-- gRPC-трейлеры, конкурентность стримов, WS фреймы во viewer
+- h2 к origin (сейчас origin — HTTP/1.1), gRPC-трейлеры, WS-фреймы во viewer
 
 **M8 — Throttling/Chaos, DNS Spoofing, Mirror, Auto Save, Profiles**
 
 **M9 — Импорт/экспорт совместимости**
-- `.chlz`/`.chls` импорт от Charles, HAR импорт/экспорт полный, cURL copy
+- `.chlz`/`.chls` импорт, HAR импорт, cURL copy (уже частично в M2/M2.5), CSV
 
 **M10 — Полировка**
-- HTTP/3 (quinn/h3), Client Process tool, Flow chart, Validate tool, IPv6/SOCKS5 доп. кейсы,
-  Happy Eyeballs, кроссплатформенная установка системного proxy (Windows/macOS/Linux)
+- HTTP/3 (quinn/h3), Windows system proxy (реестр), Client Process, IPv6/SOCKS5,
+  Happy Eyeballs
 
 ---
 
@@ -400,4 +447,12 @@ rproxy replay session.rpz --repeat 5 --delay 200ms           # аналог Repe
    (совместимо с экспортом Charles)? → предлагается TOML для конфигов, JSON внутри `.rpz`.
 2. Нужна ли поддержка мобильных клиентов "из коробки" (как Charles for iOS) — вероятно, нет
    в первой версии; достаточно того, что телефон может использовать rproxy как обычный HTTP-proxy.
-3. Лицензия: MIT/Apache-2.0 — стандарт для открытых Rust-проектов.
+3. Лицензия: MIT/Apache-2.0 — стандарт для открытых Rust-проектов. → **Решено: MIT** (2026-09).
+
+### 11.1 Решено в ходе работы
+- MITM по умолчанию включён в GUI/CLI (`with_mitm()`), CA в `~/.rproxy`; верификация
+  сертификата origin отключена до появления настройки (debug proxy по умолчанию).
+- Origin-соединения в MITM — HTTP/1.1 (h2 к origin — M7).
+- GUI в стиле Charles: меню-бар, иконочный тулбар, дерево хостов с Encrypted-группой,
+  Filter внизу панели, статус-бар «Recording». Тела запросов/ответов — с M2.
+- MCP-этап M2.5 вставлен после захвата тел (см. §2.1, §9): без тел MCP-тулам читать нечего.
