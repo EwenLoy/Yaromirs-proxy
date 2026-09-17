@@ -449,19 +449,20 @@ async fn handle_forward(
     }
 
     // Буферизуем тело запроса (лимит BODY_CAPTURE_LIMIT).
-    let (req_parts, req_body_in) = req.into_parts();
+    let (_, req_body_in) = req.into_parts();
     let (req_bytes, _trunc) = capture_body(req_body_in).await;
     exchange.request_body = Some(req_bytes.clone());
     state.bus.publish(ProxyEvent::ExchangeUpdated(exchange.clone()));
 
-    // Форвардинг: absolute-URI сохраняется; коннектор резолвит host из URI.
+    // Форвардинг: строим исходящий запрос из model_req (после pipeline —
+    // Map Remote / Rewrite уже применились к uri/headers).
     let client: Client<HttpConnector, Full<Bytes>> =
         Client::builder(TokioExecutor::new()).build_http();
 
     let mut builder = http::Request::builder()
-        .method(req_parts.method.clone())
-        .uri(req_parts.uri.clone());
-    for (k, v) in req_parts.headers.iter() {
+        .method(model_req.method.as_str())
+        .uri(model_req.uri.as_str());
+    for (k, v) in &model_req.headers {
         builder = builder.header(k, v);
     }
     let outgoing = match builder.body(Full::new(req_bytes)) {
@@ -619,15 +620,23 @@ async fn forward_https_decrypted(
     }
 
     // Буферизуем тело запроса.
-    let (mut parts, body_in) = req.into_parts();
+    let (_, body_in) = req.into_parts();
     let (req_bytes, _) = capture_body(body_in).await;
     exchange.request_body = Some(req_bytes.clone());
     state.bus.publish(ProxyEvent::ExchangeUpdated(exchange.clone()));
 
-    // Origin: host:port из authority (порт по умолчанию 443).
-    let (host, port) = match authority.rsplit_once(':') {
+    // Origin из model_req (Map Remote мог переписать host).
+    let rest = model_req
+        .uri
+        .strip_prefix("https://")
+        .unwrap_or(&model_req.uri);
+    let (target_authority, target_path) = match rest.split_once('/') {
+        Some((h, p)) => (h.to_string(), format!("/{p}")),
+        None => (rest.to_string(), "/".to_string()),
+    };
+    let (host, port) = match target_authority.rsplit_once(':') {
         Some((h, p)) => (h.to_string(), p.parse().unwrap_or(443u16)),
-        None => (authority.clone(), 443u16),
+        None => (target_authority.clone(), 443u16),
     };
 
     let connector = TlsConnector::from(mitm.client_config.clone());
@@ -668,14 +677,21 @@ async fn forward_https_decrypted(
         let _ = conn.await;
     });
 
-    // origin-form запрос: path-only URI + Host.
-    parts.uri = path.parse::<http::Uri>().expect("valid path_and_query");
-    if let Ok(host_hdr) = http::HeaderValue::from_str(&authority) {
-        parts.headers.insert(http::header::HOST, host_hdr);
+    // origin-form запрос: path-only URI + Host (из model_req после pipeline).
+    let mut builder = http::Request::builder()
+        .method(model_req.method.as_str())
+        .uri(target_path.as_str());
+    for (k, v) in &model_req.headers {
+        if k.eq_ignore_ascii_case("host") {
+            continue;
+        }
+        builder = builder.header(k, v);
     }
-    parts.headers.remove("proxy-connection");
-    parts.headers.remove("proxy-authorization");
-    let outgoing = http::Request::from_parts(parts, Full::new(req_bytes));
+    if let Ok(host_hdr) = http::HeaderValue::from_str(&target_authority) {
+        builder = builder.header(http::header::HOST, host_hdr);
+    }
+    builder = builder.header(http::header::CONNECTION, "close");
+    let outgoing = builder.body(Full::new(req_bytes)).expect("valid request");
 
     let result = sender.send_request(outgoing).await;
 

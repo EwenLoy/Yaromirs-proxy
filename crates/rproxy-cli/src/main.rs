@@ -19,6 +19,10 @@ struct Cli {
     #[arg(long)]
     har: Option<String>,
 
+    /// TOML-конфиг тулов (Block List, Map Local/Remote, No Caching, Block Cookies)
+    #[arg(long)]
+    tools: Option<String>,
+
     /// Поднять MCP-сервер на stdio (для AI-агентов: Claude Code, Codex, Cursor)
     #[arg(long)]
     mcp: bool,
@@ -29,7 +33,15 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     let bus = EventBus::new();
-    let pipeline = Pipeline::new();
+    let pipeline = match &cli.tools {
+        Some(path) => {
+            let p = rproxy_core::tools::load_pipeline(std::path::Path::new(path))
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            eprintln!("[rproxy] tools loaded from {path}");
+            p
+        }
+        None => Pipeline::new(),
+    };
     let server = ProxyServer::new(bus.clone(), pipeline).with_mitm();
 
     let mut events = bus.subscribe();

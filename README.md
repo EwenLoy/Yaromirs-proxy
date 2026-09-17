@@ -67,6 +67,29 @@ cargo run -p rproxy-cli -- --port 8888
 cargo run -p rproxy-cli -- --port 8888 --mcp
 ```
 
+### Tools (M3) — TOML config
+
+```bash
+rproxy --tools tools.toml
+```
+
+```toml
+[[block]]
+match = "ads.example.com"
+status = 403
+
+no_caching = true
+
+[[map_local]]
+match = "https://api.test/config"
+file = "mock.json"
+content_type = "application/json"
+
+[[map_remote]]
+match = "api.old.com"
+replace = "api.new.com"
+```
+
 ### MCP — proxy for AI agents
 
 `rproxy` is **headless by design**: an AI agent can drive the proxy without any GUI —

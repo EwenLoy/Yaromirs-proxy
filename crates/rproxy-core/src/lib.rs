@@ -5,6 +5,7 @@ pub mod events;
 pub mod model;
 pub mod net;
 pub mod pipeline;
+pub mod tools;
 
 pub use events::{EventBus, ProxyEvent};
 pub use model::{
