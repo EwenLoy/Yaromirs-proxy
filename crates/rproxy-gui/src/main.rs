@@ -4,6 +4,12 @@ use rproxy_core::{EventBus, ProxyEvent, ProxyServer};
 use std::sync::mpsc::{channel, Receiver};
 use std::time::SystemTime;
 
+const BG: Color32 = Color32::from_rgb(0x2B, 0x2B, 0x2B);
+const PANEL: Color32 = Color32::from_rgb(0x33, 0x33, 0x33);
+const SELECT: Color32 = Color32::from_rgb(0x2F, 0x6F, 0xED);
+const TEXT: Color32 = Color32::from_rgb(0xD4, 0xD4, 0xD4);
+const DIM: Color32 = Color32::from_rgb(0x8A, 0x8A, 0x8A);
+
 fn main() -> eframe::Result<()> {
     let port: u16 = std::env::var("RPROXY_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(8888);
     let (tx, rx) = channel::<rproxy_core::Exchange>();
@@ -25,7 +31,6 @@ fn main() -> eframe::Result<()> {
                 }
             });
             let server = ProxyServer::new(bus2, rproxy_core::Pipeline::new()).with_mitm();
-            eprintln!("[rproxy-gui] proxy on http://127.0.0.1:{port} (HTTP + MITM HTTPS)");
             let _ = server.run(&format!("127.0.0.1:{port}")).await;
         });
     }).expect("engine thread");
@@ -33,15 +38,35 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "rproxy",
         eframe::NativeOptions {
-            viewport: egui::ViewportBuilder::default().with_inner_size([1280.0, 800.0]),
+            viewport: egui::ViewportBuilder::default()
+                .with_inner_size([1240.0, 780.0])
+                .with_min_inner_size([900.0, 560.0]),
             ..Default::default()
         },
         Box::new(move |cc| {
-            cc.egui_ctx.set_pixels_per_point(1.0);
-            cc.egui_ctx.set_visuals(egui::Visuals::dark());
+            setup_style(&cc.egui_ctx);
             Ok(Box::new(App::new(rx, port)))
         }),
     )
+}
+
+fn setup_style(ctx: &egui::Context) {
+    let mut style = (*ctx.style()).clone();
+    style.visuals.dark_mode = true;
+    style.visuals.panel_fill = BG;
+    style.visuals.window_fill = PANEL;
+    style.visuals.extreme_bg_color = Color32::from_rgb(0x24, 0x24, 0x24);
+    style.visuals.selection.bg_fill = SELECT;
+    style.visuals.selection.stroke = egui::Stroke::NONE;
+    style.visuals.widgets.hovered.bg_fill = Color32::from_rgb(0x3E, 0x3E, 0x3E);
+    style.visuals.widgets.active.bg_fill = Color32::from_rgb(0x46, 0x46, 0x46);
+    style.visuals.widgets.inactive.bg_fill = Color32::TRANSPARENT;
+    style.visuals.widgets.noninteractive.bg_fill = Color32::TRANSPARENT;
+    style.visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, TEXT);
+    style.visuals.override_text_color = Some(TEXT);
+    style.spacing.item_spacing = egui::vec2(6.0, 3.0);
+    style.spacing.button_padding = egui::vec2(6.0, 2.0);
+    ctx.set_style(style);
 }
 
 #[derive(Clone)]
@@ -96,14 +121,10 @@ fn now_str() -> String {
 impl Row {
     fn body_str(b: &Option<bytes::Bytes>) -> Option<String> {
         b.as_ref().and_then(|b| {
-            if b.is_empty() {
-                None
-            } else {
-                Some(match std::str::from_utf8(b) {
-                    Ok(s) => s.to_string(),
-                    Err(_) => format!("[binary, {} bytes]", b.len()),
-                })
-            }
+            (b.len() > 0).then(|| match std::str::from_utf8(b) {
+                Ok(s) => s.to_string(),
+                Err(_) => format!("[binary, {} bytes]", b.len()),
+            })
         })
     }
 
@@ -125,10 +146,7 @@ impl Row {
         let resp = ex.response_body_decoded.as_ref().or(ex.response_body.as_ref());
         Self {
             id: ex.id.0 as u32,
-            locked,
-            method,
-            host,
-            path,
+            locked, method, host, path,
             status: ex.response_status.unwrap_or(0),
             time: now_str(),
             duration: ex.timing.total().map(|d| format!("{d:.1?}")).unwrap_or_else(|| "-".into()),
@@ -140,17 +158,6 @@ impl Row {
         }
     }
 
-    fn pretty_body(body: &Option<String>, content_type: &Option<String>) -> String {
-        let Some(text) = body else { return "(пусто)".into() };
-        if content_type.as_deref().map_or(false, |ct| ct.contains("json")) {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(text) {
-                if let Ok(pretty) = serde_json::to_string_pretty(&v) {
-                    return pretty;
-                }
-            }
-        }
-        text.clone()
-    }
     fn url(&self) -> String {
         format!("{}://{}{}", if self.locked { "https" } else { "http" }, self.host, self.path)
     }
@@ -158,14 +165,35 @@ impl Row {
     fn is_json(&self) -> bool {
         self.content_type.as_deref().map_or(false, |ct| ct.contains("json"))
     }
+
+    fn method_color(m: &str) -> Color32 {
+        match m {
+            "GET" => Color32::from_rgb(0x3A, 0x8F, 0xD6),
+            "POST" => Color32::from_rgb(0x3A, 0xA1, 0x5A),
+            "PUT" => Color32::from_rgb(0xB5, 0x86, 0x2A),
+            "DELETE" => Color32::from_rgb(0xC0, 0x46, 0x3F),
+            "PATCH" => Color32::from_rgb(0x7A, 0x5C, 0xC9),
+            "CONNECT" => Color32::from_rgb(0x6E, 0x6E, 0x6E),
+            _ => Color32::GRAY,
+        }
+    }
+
+    fn status_color(s: u16) -> Color32 {
+        match s {
+            200..=299 => Color32::from_rgb(0x2E, 0x9E, 0x4B),
+            300..=399 => Color32::from_rgb(0xC9, 0x8A, 0x1A),
+            0 => DIM,
+            _ => Color32::from_rgb(0xD0, 0x40, 0x3A),
+        }
+    }
 }
 
 impl App {
     fn new(rx: Receiver<rproxy_core::Exchange>, port: u16) -> Self {
         Self {
             port, recording: true, ssl_hint: true, filter: String::new(), sel_host: None,
-            tab: Tab::Overview, sel_row: None, body_pretty: true, rows: Vec::new(), hosts: Vec::new(),
-            exchanges: Vec::new(), about: false, rx,
+            tab: Tab::Overview, sel_row: None, body_pretty: true, rows: Vec::new(),
+            hosts: Vec::new(), exchanges: Vec::new(), about: false, rx,
         }
     }
 
@@ -208,7 +236,11 @@ impl eframe::App for App {
         self.poll();
         self.menus(ctx);
         self.toolbar(ctx);
-        egui::SidePanel::left("hosts").resizable(true).default_width(280.0).show(ctx, |ui| self.tree(ui));
+        egui::SidePanel::left("hosts")
+            .resizable(true)
+            .default_width(260.0)
+            .min_width(180.0)
+            .show(ctx, |ui| self.tree(ui));
         self.status_bar(ctx);
         egui::CentralPanel::default().show(ctx, |ui| self.central(ui));
         if self.about {
@@ -231,20 +263,16 @@ impl App {
             egui::menu::bar(ui, |ui| {
                 ui.menu_button("File", |ui| {
                     if ui.button("Clear Session").clicked() {
-                        self.rows.clear();
-                        self.exchanges.clear();
-                        self.sel_row = None;
-                        self.sel_host = None;
+                        self.rows.clear(); self.exchanges.clear();
+                        self.sel_row = None; self.sel_host = None;
                         ui.close_menu();
                     }
                     if ui.button("Save session as HAR…").clicked() {
                         if let Some(path) = rfd::FileDialog::new()
-                            .add_filter("HAR", &["har"])
-                            .set_file_name("session.har")
-                            .save_file()
+                            .add_filter("HAR", &["har"]).set_file_name("session.har").save_file()
                         {
                             match rproxy_export::write_har(&path, &self.exchanges) {
-                                Ok(()) => println!("[rproxy] HAR сохранён: {}", path.display()),
+                                Ok(()) => println!("[rproxy] HAR saved: {}", path.display()),
                                 Err(e) => eprintln!("[rproxy] HAR save failed: {e}"),
                             }
                         }
@@ -255,8 +283,8 @@ impl App {
                     }
                 });
                 ui.menu_button("Edit", |ui| {
-                    let can_copy = self.rows.iter().any(|r| Some(r.id) == self.sel_row);
-                    if ui.add_enabled(can_copy, egui::Button::new("Copy URL")).clicked() {
+                    let can = self.rows.iter().any(|r| Some(r.id) == self.sel_row);
+                    if ui.add_enabled(can, egui::Button::new("Copy URL")).clicked() {
                         if let Some(r) = self.rows.iter().find(|r| Some(r.id) == self.sel_row) {
                             ctx.copy_text(r.url());
                         }
@@ -274,14 +302,14 @@ impl App {
                     if ui.button("About rproxy").clicked() { self.about = true; ui.close_menu(); }
                     if ui.button("Save CA certificate…").clicked() {
                         match save_ca() {
-                            Ok(p) => println!("[rproxy] CA сохранён: {}", p.display()),
+                            Ok(p) => println!("[rproxy] CA saved: {}", p.display()),
                             Err(e) => eprintln!("[rproxy] CA save failed: {e}"),
                         }
                         ui.close_menu();
                     }
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.weak("rproxy");
+                    ui.weak(RichText::new("rproxy 0.1.0").color(DIM));
                 });
             });
         });
@@ -289,128 +317,168 @@ impl App {
 
     fn toolbar(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
+            ui.add_space(2.0);
             ui.horizontal(|ui| {
-                if ui.button("🗑").on_hover_text("Clear").clicked() {
-                    self.rows.clear();
-                    self.sel_row = None;
+                if ui.button("🗑").on_hover_text("Clear session").clicked() {
+                    self.rows.clear(); self.exchanges.clear(); self.sel_row = None;
                 }
                 if ui.button("✏").on_hover_text("Compose (M6)").clicked() {}
                 if ui.button("⟳").on_hover_text("Repeat (M6)").clicked() {}
                 ui.separator();
                 let rec = if self.recording { "⏸" } else { "⏺" };
                 if ui.button(rec).on_hover_text("Record").clicked() { self.recording = !self.recording; }
-                ui.separator();
-                if ui.button("🐢").on_hover_text("Throttle (M8)").clicked() {}
-                if ui.button("⛔").on_hover_text("Breakpoints (M6)").clicked() {}
-            });
-        });
-    }
-
-    fn tree(&mut self, ui: &mut egui::Ui) {
-        let hosts = self.hosts.clone(); // избежать borrow-конфликта с host_row
-        let n_enc = hosts.iter().filter(|h| h.secure).count();
-        ui.add_space(4.0);
-        for h in hosts.iter().filter(|h| !h.secure) {
-            self.host_row(ui, &h.name, h.secure);
-        }
-        if n_enc > 0 {
-            egui::CollapsingHeader::new(RichText::new(format!("🔒 Encrypted ({n_enc})")).strong())
-                .default_open(true)
-                .show(ui, |ui| {
-                    for h in hosts.iter().filter(|h| h.secure) {
-                        self.host_row(ui, &h.name, h.secure);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("⛔").on_hover_text("Breakpoints (M6)").clicked() {}
+                    if ui.button("🐢").on_hover_text("Throttle (M8)").clicked() {}
+                    ui.separator();
+                    if ui.button("💾").on_hover_text("Save session as HAR").clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("HAR", &["har"]).set_file_name("session.har").save_file()
+                        {
+                            let _ = rproxy_export::write_har(&path, &self.exchanges);
+                        }
                     }
                 });
-        }
-        if self.hosts.is_empty() {
-            ui.weak("No traffic yet");
-            ui.weak(format!("Route via http://127.0.0.1:{}", self.port));
-        }
-        if !self.hosts.is_empty() && ui.button("Show all traffic").clicked() {
-            self.sel_host = None;
-        }
-
-        // Фильтр — низ панели, как в Charles.
-        egui::TopBottomPanel::bottom("tree_filter").show_inside(ui, |ui| {
-            ui.add(egui::TextEdit::singleline(&mut self.filter).hint_text("Filter"));
+            });
+            ui.add_space(2.0);
         });
     }
 
-    fn host_row(&mut self, ui: &mut egui::Ui, name: &str, secure: bool) {
+
+    fn tree(&mut self, ui: &mut egui::Ui) {
+        let hosts = self.hosts.clone();
+        let plain: Vec<&Host> = hosts.iter().filter(|h| !h.secure).collect();
+        let enc: Vec<&Host> = hosts.iter().filter(|h| h.secure).collect();
+
+        ui.add_space(4.0);
+        egui::ScrollArea::vertical().id_salt("tree").auto_shrink(false).show(ui, |ui| {
+            for h in &plain {
+                self.host_row(ui, &h.name, h.secure, h.count);
+            }
+            if !enc.is_empty() {
+                egui::CollapsingHeader::new(
+                    RichText::new(format!("🔒 Encrypted ({})", enc.len())).color(SELECT),
+                )
+                .default_open(true)
+                .show(ui, |ui| {
+                    for h in &enc {
+                        self.host_row(ui, &h.name, h.secure, h.count);
+                    }
+                });
+            }
+            if hosts.is_empty() {
+                ui.weak("No traffic yet");
+                ui.weak(format!("Proxy: http://127.0.0.1:{}", self.port));
+            }
+        });
+
+        // Filter — закреплён внизу панели, как в Charles.
+        egui::TopBottomPanel::bottom("tree_filter")
+            .frame(egui::Frame::none().outer_margin(egui::Margin::symmetric(6.0, 6.0)))
+            .show_inside(ui, |ui| {
+                ui.add(egui::TextEdit::singleline(&mut self.filter)
+                    .hint_text("Filter")
+                    .desired_width(f32::INFINITY));
+            });
+    }
+
+    fn host_row(&mut self, ui: &mut egui::Ui, name: &str, secure: bool, count: u32) {
         let selected = self.sel_host.as_deref() == Some(name);
         let icon = if secure { "🔒" } else { "🌐" };
-        if ui.selectable_label(selected, format!("{icon} {name}")).clicked() {
-            self.sel_host = if selected { None } else { Some(name.to_string()) };
-            self.sel_row = None;
-        }
+        ui.horizontal(|ui| {
+            let label = RichText::new(format!("{icon} {name}"))
+                .color(if selected { Color32::WHITE } else { TEXT });
+            if ui.selectable_label(selected, label).clicked() {
+                self.sel_host = if selected { None } else { Some(name.to_string()) };
+                self.sel_row = None;
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.weak(RichText::new(count.to_string()).color(DIM));
+            });
+        });
     }
 
     fn status_bar(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
+            ui.add_space(2.0);
             ui.horizontal(|ui| {
-                ui.label(if self.recording { "Recording started" } else { "Recording stopped" });
+                ui.label(RichText::new(
+                    if self.recording { "Recording started" } else { "Recording stopped" },
+                ).color(DIM));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if self.recording {
                         ui.label(RichText::new(" Recording ")
-                            .background_color(Color32::from_rgb(46, 158, 75))
+                            .background_color(Color32::from_rgb(0x2E, 0x9E, 0x4B))
                             .color(Color32::WHITE));
                     }
                 });
             });
+            ui.add_space(2.0);
         });
     }
 
 
     fn central(&mut self, ui: &mut egui::Ui) {
-        if self.visible().is_empty() {
-            ui.centered_and_justified(|ui| {
-                ui.weak(format!("No traffic — route apps via http://127.0.0.1:{}", self.port));
+        if self.rows.is_empty() {
+            ui.vertical_centered(|ui| {
+                ui.add_space(ui.available_height() * 0.35);
+                ui.label(RichText::new("No traffic yet").size(18.0).color(DIM));
+                ui.label(RichText::new(format!("Route apps via http://127.0.0.1:{}", self.port)).color(DIM));
             });
             return;
         }
-        egui::ScrollArea::both().id_salt("seq")
-            .max_height(ui.available_height() * 0.55)
-            .show(ui, |ui| self.table(ui));
-        ui.separator();
-        self.detail(ui);
+
+        // Детали снизу (resizable), таблица занимает остальное.
+        egui::TopBottomPanel::bottom("detail_panel")
+            .resizable(true)
+            .default_height(ui.available_height() * 0.45)
+            .frame(egui::Frame::none().inner_margin(egui::Margin::same(6.0)))
+            .show_inside(ui, |ui| self.detail(ui));
+
+        egui::ScrollArea::both().id_salt("seq").auto_shrink(false).show(ui, |ui| {
+            self.table(ui);
+        });
     }
 
     fn table(&mut self, ui: &mut egui::Ui) {
-        egui::Grid::new("seq_grid").num_columns(7).striped(true).min_col_width(60.0).show(ui, |ui| {
-            for h in ["", "Method", "Host", "Path", "Status", "Time", "Duration"] {
-                ui.label(RichText::new(h).strong());
-            }
-            ui.end_row();
-            let mut clicked = None;
-            for r in self.visible() {
-                let sel = self.sel_row == Some(r.id);
-                if ui.selectable_label(sel, if r.locked { "🔒" } else { "🌐" }).clicked() { clicked = Some(r.id); }
-                let mc = match r.method.as_str() {
-                    "GET" => Color32::from_rgb(58, 143, 214),
-                    "POST" => Color32::from_rgb(58, 161, 90),
-                    "PUT" => Color32::from_rgb(181, 134, 42),
-                    "DELETE" => Color32::from_rgb(192, 70, 63),
-                    "PATCH" => Color32::from_rgb(122, 92, 201),
-                    "CONNECT" => Color32::from_rgb(120, 120, 130),
-                    _ => Color32::GRAY,
-                };
-                if ui.selectable_label(sel, RichText::new(r.method.as_str()).color(Color32::WHITE).background_color(mc)).clicked() { clicked = Some(r.id); }
-                if ui.selectable_label(sel, r.host.as_str()).clicked() { clicked = Some(r.id); }
-                if ui.selectable_label(sel, r.path.as_str()).clicked() { clicked = Some(r.id); }
-                let sc = match r.status {
-                    200..=299 => Color32::from_rgb(46, 158, 75),
-                    300..=399 => Color32::from_rgb(201, 138, 26),
-                    0 => Color32::GRAY,
-                    _ => Color32::from_rgb(208, 64, 58),
-                };
-                if ui.selectable_label(sel, RichText::new(r.status.to_string()).color(sc).strong()).clicked() { clicked = Some(r.id); }
-                if ui.selectable_label(sel, r.time.as_str()).clicked() { clicked = Some(r.id); }
-                if ui.selectable_label(sel, r.duration.as_str()).clicked() { clicked = Some(r.id); }
+        let rows = self.visible();
+        let sel_row = self.sel_row;
+        let clicked = egui::Grid::new("seq_grid")
+            .num_columns(7)
+            .striped(true)
+            .spacing([12.0, 4.0])
+            .min_col_width(50.0)
+            .show(ui, |ui| {
+                ui.strong("");
+                ui.strong("Method");
+                ui.strong("Host");
+                ui.strong("Path");
+                ui.strong("Status");
+                ui.strong("Time");
+                ui.strong("Duration");
                 ui.end_row();
-            }
-            if let Some(id) = clicked { self.sel_row = Some(id); }
-        });
+
+                let mut clicked = None;
+                for r in &rows {
+                    let sel = sel_row == Some(r.id);
+
+                    if ui.selectable_label(sel, if r.locked { "🔒" } else { "🌐" }).clicked() { clicked = Some(r.id); }
+                    let mc = Row::method_color(&r.method);
+                    if ui.selectable_label(sel, RichText::new(r.method.as_str()).color(Color32::WHITE).background_color(mc)).clicked() { clicked = Some(r.id); }
+                    if ui.selectable_label(sel, RichText::new(r.host.as_str()).color(if sel { Color32::WHITE } else { TEXT })).clicked() { clicked = Some(r.id); }
+                    if ui.selectable_label(sel, RichText::new(r.path.as_str()).color(if sel { Color32::WHITE } else { TEXT })).clicked() { clicked = Some(r.id); }
+                    let st = RichText::new(r.status.to_string()).color(Row::status_color(r.status)).strong();
+                    if ui.selectable_label(sel, st).clicked() { clicked = Some(r.id); }
+                    if ui.selectable_label(sel, RichText::new(r.time.as_str()).color(DIM)).clicked() { clicked = Some(r.id); }
+                    if ui.selectable_label(sel, RichText::new(r.duration.as_str()).color(DIM)).clicked() { clicked = Some(r.id); }
+                    ui.end_row();
+                }
+                clicked
+            });
+            if let Some(id) = clicked.inner { self.sel_row = Some(id); }
     }
+
+
 
     fn detail(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
@@ -423,75 +491,76 @@ impl App {
             }
         });
         ui.separator();
+
         let Some(r) = self.rows.iter().find(|r| Some(r.id) == self.sel_row).cloned() else {
             ui.weak("Выберите запрос в таблице");
             return;
         };
-        egui::ScrollArea::vertical().id_salt("det").show(ui, |ui| match self.tab {
-            Tab::Overview => {
-                egui::Grid::new("ov").num_columns(2).spacing([16.0, 4.0]).show(ui, |ui| {
-                    ui.weak("URL"); ui.monospace(r.url()); ui.end_row();
-                    ui.weak("Method"); ui.monospace(r.method.as_str()); ui.end_row();
-                    ui.weak("Status"); ui.monospace(r.status.to_string()); ui.end_row();
-                    ui.weak("Host"); ui.monospace(r.host.as_str()); ui.end_row();
-                    ui.weak("Duration"); ui.monospace(r.duration.as_str()); ui.end_row();
-                });
-            }
-            Tab::Request => {
-                ui.monospace(format!("{} {} HTTP/1.1", r.method, r.path));
-                ui.separator();
-                ui.weak("Headers:");
-                for (k, v) in &r.req_headers {
-                    ui.monospace(format!("{k}: {v}"));
+
+        egui::ScrollArea::vertical().id_salt("det").auto_shrink(false).show(ui, |ui| {
+            match self.tab {
+                Tab::Overview => {
+                    egui::Grid::new("ov").num_columns(2).spacing([16.0, 3.0]).show(ui, |ui| {
+                        ui.weak("URL"); ui.monospace(r.url()); ui.end_row();
+                        ui.weak("Method"); ui.monospace(r.method.as_str()); ui.end_row();
+                        ui.weak("Status"); ui.monospace(RichText::new(r.status.to_string()).color(Row::status_color(r.status))); ui.end_row();
+                        ui.weak("Host"); ui.monospace(r.host.as_str()); ui.end_row();
+                        ui.weak("Duration"); ui.monospace(r.duration.as_str()); ui.end_row();
+                    });
                 }
-                ui.separator();
-                ui.weak("Body:");
-                if r.req_body.is_some() {
-                    ui.monospace(Row::pretty_body(&r.req_body, &None));
-                } else {
-                    ui.weak("(пусто)");
-                }
-            }
-            Tab::Response => {
-                ui.monospace(format!("HTTP/1.1 {}", r.status));
-                ui.separator();
-                ui.weak("Headers:");
-                for (k, v) in &r.resp_headers {
-                    ui.monospace(format!("{k}: {v}"));
-                }
-                ui.separator();
-                ui.weak("Body:");
-                if self.body_pretty && r.is_json() {
-                    if let Some(text) = &r.resp_body {
-                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(text) {
-                            App::json_tree(ui, "", &v, 0);
-                            return;
-                        }
+                Tab::Request => {
+                    ui.monospace(format!("{} {} HTTP/1.1", r.method, r.path));
+                    section(ui, "Headers");
+                    for (k, v) in &r.req_headers {
+                        ui.monospace(RichText::new(format!("{k}: {v}")).color(TEXT));
+                    }
+                    section(ui, "Body");
+                    if let Some(b) = &r.req_body {
+                        ui.monospace(b.as_str());
+                    } else {
+                        ui.weak("(пусто)");
                     }
                 }
-                ui.monospace(Row::pretty_body(&r.resp_body, &r.content_type));
-            }
-            Tab::Timing => {
-                ui.monospace(format!("Total: {}", r.duration));
+                Tab::Response => {
+                    ui.monospace(format!("HTTP/1.1 {}", r.status));
+                    section(ui, "Headers");
+                    for (k, v) in &r.resp_headers {
+                        ui.monospace(RichText::new(format!("{k}: {v}")).color(TEXT));
+                    }
+                    section(ui, "Body");
+                    if self.body_pretty && r.is_json() {
+                        if let Some(text) = &r.resp_body {
+                            if let Ok(v) = serde_json::from_str::<serde_json::Value>(text) {
+                                Self::json_tree(ui, "json", &v, 0);
+                                return;
+                            }
+                        }
+                    }
+                    if let Some(b) = &r.resp_body {
+                        ui.monospace(b.as_str());
+                    } else {
+                        ui.weak("(пусто)");
+                    }
+                }
+                Tab::Timing => {
+                    ui.monospace(format!("Total: {}", r.duration));
+                }
             }
         });
     }
 
     fn json_tree(ui: &mut egui::Ui, key: &str, value: &serde_json::Value, depth: usize) {
-        if depth > 20 {
-            ui.weak("…");
-            return;
-        }
+        if depth > 20 { ui.weak("…"); return; }
         match value {
             serde_json::Value::Object(map) => {
-                egui::CollapsingHeader::new(format!("📁 {key} {{{}}}", map.len()))
+                egui::CollapsingHeader::new(RichText::new(format!("📁 {key} {{{}}}", map.len())).color(TEXT))
                     .default_open(depth < 2)
                     .show(ui, |ui| {
                         for (k, v) in map { Self::json_tree(ui, k, v, depth + 1); }
                     });
             }
             serde_json::Value::Array(arr) => {
-                egui::CollapsingHeader::new(format!("📁 {key} [{}]", arr.len()))
+                egui::CollapsingHeader::new(RichText::new(format!("📁 {key} [{}]", arr.len())).color(TEXT))
                     .default_open(depth < 2)
                     .show(ui, |ui| {
                         for (i, v) in arr.iter().enumerate() {
@@ -513,10 +582,15 @@ impl App {
     }
 }
 
+fn section(ui: &mut egui::Ui, label: &str) {
+    ui.add_space(2.0);
+    ui.label(RichText::new(label).strong().color(DIM));
+    ui.separator();
+}
+
 fn save_ca() -> std::io::Result<std::path::PathBuf> {
     let dir = rproxy_cert::default_ca_dir().ok_or_else(|| std::io::Error::other("no home dir"))?;
     let dst = std::path::PathBuf::from("rproxy-ca.pem");
     std::fs::copy(dir.join("ca.cert.pem"), &dst)?;
     Ok(dst)
 }
-
