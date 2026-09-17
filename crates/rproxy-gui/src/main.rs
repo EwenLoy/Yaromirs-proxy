@@ -276,6 +276,7 @@ impl eframe::App for App {
         }
         if self.about {
             let mut open = self.about;
+            let mut close_clicked = false;
             egui::Window::new("About rproxy")
                 .collapsible(false)
                 .open(&mut open)
@@ -286,10 +287,10 @@ impl eframe::App for App {
                     ui.label("MITM HTTPS: enabled (CA in %USERPROFILE%\\.rproxy\\ca.cert.pem)");
                     ui.add_space(6.0);
                     if ui.button("Close").clicked() {
-                        open = false;
+                        close_clicked = true;
                     }
                 });
-            self.about = open;
+            self.about = open && !close_clicked;
         }
         if !self.pending_bp.is_empty() || self.bp_on {
             self.breakpoints_window(ctx);
