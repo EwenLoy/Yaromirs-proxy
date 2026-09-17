@@ -97,10 +97,42 @@ struct Row {
 }
 
 #[derive(Clone)]
-struct Host {
+struct Node {
     name: String,
+    children: Vec<Node>,
+    count: u32,
+    leaf: bool,
+}
+
+impl Node {
+    fn new(name: &str) -> Self {
+        Self { name: name.into(), children: Vec::new(), count: 0, leaf: false }
+    }
+
+    fn insert(&mut self, segs: &[&str]) {
+        self.count += 1;
+        match segs.split_first() {
+            None => self.leaf = true,
+            Some((first, rest)) => {
+                let child = match self.children.iter_mut().find(|c| c.name == *first) {
+                    Some(c) => c,
+                    None => {
+                        self.children.push(Node::new(first));
+                        self.children.last_mut().unwrap()
+                    }
+                };
+                child.insert(rest);
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
+struct TreeRoot {
+    host: String,
     secure: bool,
     count: u32,
+    root: Node,
 }
 
 #[derive(PartialEq, Clone, Copy)]
@@ -111,12 +143,12 @@ struct App {
     recording: bool,
     ssl_hint: bool,
     filter: String,
-    sel_host: Option<String>,
+    sel_host: Option<(String, String)>, // (host, path prefix)
     tab: Tab,
     sel_row: Option<u32>,
     body_pretty: bool,
     rows: Vec<Row>,
-    hosts: Vec<Host>,
+    trees: Vec<TreeRoot>,
     exchanges: Vec<rproxy_core::Exchange>,
     about: bool,
     install_win: bool,
@@ -214,7 +246,7 @@ impl App {
         Self {
             port, recording: true, ssl_hint: true, filter: String::new(), sel_host: None,
             tab: Tab::Overview, sel_row: None, body_pretty: true, rows: Vec::new(),
-            hosts: Vec::new(), exchanges: Vec::new(), about: false,
+            trees: Vec::new(), exchanges: Vec::new(), about: false,
             install_win: false, install_msg: None,
             bp_hub: bp_hub.clone(), bp_on: false, bp_pattern: String::new(),
             pending_bp: Vec::new(), rx,
@@ -232,20 +264,46 @@ impl App {
                 GuiEv::Bp(ex) => self.pending_bp.push(Row::from(&ex)),
             }
         }
-        self.hosts.clear();
+
+        // Structure tree: хост → сегменты пути → leaf.
+        self.trees.clear();
         for r in &self.rows {
-            match self.hosts.iter_mut().find(|h| h.name == r.host) {
-                Some(h) => h.count += 1,
-                None => self.hosts.push(Host { name: r.host.clone(), secure: r.locked, count: 1 }),
+            let segs: Vec<&str> = {
+                let base = r.path.split('?').next().unwrap_or("/");
+                base.trim_start_matches('/').split('/').filter(|s| !s.is_empty()).collect()
+            };
+            match self.trees.iter_mut().find(|t| t.host == r.host) {
+                Some(t) => {
+                    t.count += 1;
+                    if t.root.children.is_empty() && segs.is_empty() {
+                        t.root.leaf = true;
+                        t.root.count += 1;
+                    } else {
+                        t.root.insert(&segs);
+                    }
+                }
+                None => {
+                    let mut root = Node::new(&r.host);
+                    root.count = 1;
+                    if segs.is_empty() {
+                        root.leaf = true;
+                    } else {
+                        root.insert(&segs);
+                    }
+                    self.trees.push(TreeRoot { host: r.host.clone(), secure: r.locked, count: 1, root });
+                }
             }
         }
-        self.hosts.sort_by(|a, b| b.count.cmp(&a.count).then(a.name.cmp(&b.name)));
+        self.trees.sort_by(|a, b| b.count.cmp(&a.count).then(a.host.cmp(&b.host)));
     }
 
     fn visible(&self) -> Vec<&Row> {
         let f = self.filter.to_lowercase();
         self.rows.iter()
-            .filter(|r| self.sel_host.as_ref().map_or(true, |h| &r.host == h))
+            .filter(|r| match &self.sel_host {
+                None => true,
+                Some((h, p)) => &r.host == h && (p.is_empty() || r.path.starts_with(p.as_str())),
+            })
             .filter(|r| f.is_empty()
                 || r.host.to_lowercase().contains(&f)
                 || r.path.to_lowercase().contains(&f)
@@ -523,14 +581,14 @@ impl App {
     }
 
     fn tree(&mut self, ui: &mut egui::Ui) {
-        let hosts = self.hosts.clone();
-        let plain: Vec<&Host> = hosts.iter().filter(|h| !h.secure).collect();
-        let enc: Vec<&Host> = hosts.iter().filter(|h| h.secure).collect();
+        let trees = self.trees.clone();
+        let plain: Vec<&TreeRoot> = trees.iter().filter(|t| !t.secure).collect();
+        let enc: Vec<&TreeRoot> = trees.iter().filter(|t| t.secure).collect();
 
         ui.add_space(4.0);
         egui::ScrollArea::vertical().id_salt("tree").auto_shrink(false).show(ui, |ui| {
-            for h in &plain {
-                self.host_row(ui, &h.name, h.secure, h.count);
+            for t in &plain {
+                self.host_tree(ui, t);
             }
             if !enc.is_empty() {
                 egui::CollapsingHeader::new(
@@ -538,14 +596,20 @@ impl App {
                 )
                 .default_open(true)
                 .show(ui, |ui| {
-                    for h in &enc {
-                        self.host_row(ui, &h.name, h.secure, h.count);
+                    for t in &enc {
+                        self.host_tree(ui, t);
                     }
                 });
             }
-            if hosts.is_empty() {
+            if trees.is_empty() {
                 ui.weak("No traffic yet");
                 ui.weak(format!("Proxy: http://127.0.0.1:{}", self.port));
+            }
+            if self.sel_host.is_some() {
+                ui.separator();
+                if ui.button("⬅ Show all traffic").clicked() {
+                    self.sel_host = None;
+                }
             }
         });
 
@@ -559,20 +623,84 @@ impl App {
             });
     }
 
-    fn host_row(&mut self, ui: &mut egui::Ui, name: &str, secure: bool, count: u32) {
-        let selected = self.sel_host.as_deref() == Some(name);
-        let icon = if secure { "🔒" } else { "🌐" };
+    /// Корень дерева: хост, под ним — дерево путей (Structure view как в Charles).
+    fn host_tree(&mut self, ui: &mut egui::Ui, t: &TreeRoot) {
+        let selected = self.sel_host.as_ref().map_or(false, |(h, _)| h == &t.host);
+        let icon = if t.secure { "🔒" } else { "🌐" };
         ui.horizontal(|ui| {
-            let label = RichText::new(format!("{icon} {name}"))
+            let label = RichText::new(format!("{icon} {}", t.host))
                 .color(if selected { Color32::WHITE } else { TEXT });
             if ui.selectable_label(selected, label).clicked() {
-                self.sel_host = if selected { None } else { Some(name.to_string()) };
+                // клик по хосту: весь трафик хоста
+                self.sel_host = if selected {
+                    None
+                } else {
+                    Some((t.host.clone(), String::new()))
+                };
                 self.sel_row = None;
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.weak(RichText::new(count.to_string()).color(DIM));
+                ui.weak(RichText::new(t.count.to_string()).color(DIM));
             });
         });
+        if t.root.children.is_empty() {
+            return;
+        }
+        egui::CollapsingHeader::new(RichText::new("▾ Structure").color(DIM))
+            .id_salt(format!("root|{}", t.host))
+            .default_open(true)
+            .show(ui, |ui| {
+                let mut clicked: Option<(String, String)> = None;
+                for child in &t.root.children {
+                    self.node_row(ui, t, child, String::new(), &mut clicked);
+                }
+                if let Some(c) = clicked {
+                    self.sel_host = Some(c);
+                    self.sel_row = None;
+                }
+            });
+    }
+
+    fn node_row(
+        &mut self,
+        ui: &mut egui::Ui,
+        t: &TreeRoot,
+        node: &Node,
+        prefix: String,
+        clicked: &mut Option<(String, String)>,
+    ) {
+        let path = format!("{prefix}/{}", node.name);
+        let node_id = format!("{}|{}", t.host, path);
+        let is_leaf = node.children.is_empty() || node.leaf;
+        let icon = if is_leaf { "📄" } else { "📁" };
+        let selected = self
+            .sel_host
+            .as_ref()
+            .map_or(false, |(h, p)| h == &t.host && p == &path);
+
+        if is_leaf {
+            let label = RichText::new(format!("{icon} {}", node.name))
+                .color(if selected { Color32::WHITE } else { TEXT });
+            if ui.selectable_label(selected, label).clicked() {
+                *clicked = Some((t.host.clone(), path));
+            }
+            ui.weak(RichText::new(format!("{}", node.count)).color(DIM));
+        } else {
+            egui::CollapsingHeader::new(
+                RichText::new(format!("{icon} {} ({})", node.name, node.count))
+                    .color(if selected { Color32::WHITE } else { TEXT }),
+            )
+            .id_salt(node_id)
+            .show(ui, |ui| {
+                // клик по заголовку папки = фильтр по префиксу
+                if ui.small_button("🔗").clicked() {
+                    *clicked = Some((t.host.clone(), path.clone()));
+                }
+                for child in &node.children {
+                    self.node_row(ui, t, child, path.clone(), clicked);
+                }
+            });
+        }
     }
 
     fn status_bar(&mut self, ctx: &egui::Context) {
