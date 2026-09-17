@@ -1,3 +1,6 @@
+// Скрыть консольное окно при запуске .exe на Windows.
+#![windows_subsystem = "windows"]
+
 use eframe::egui;
 use egui::{Color32, RichText};
 use rproxy_core::{EventBus, ProxyEvent, ProxyServer};
@@ -50,6 +53,7 @@ fn main() -> eframe::Result<()> {
             ..Default::default()
         },
         Box::new(move |cc| {
+            cc.egui_ctx.set_pixels_per_point(1.4);
             setup_style(&cc.egui_ctx);
             Ok(Box::new(App::new(rx, port, bp_hub)))
         }),
