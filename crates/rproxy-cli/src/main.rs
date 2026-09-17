@@ -23,6 +23,10 @@ struct Cli {
     #[arg(long)]
     tools: Option<String>,
 
+    /// Включить breakpoints: удерживать запросы, где URL содержит подстроку
+    #[arg(long)]
+    bp: Option<String>,
+
     /// Поднять MCP-сервер на stdio (для AI-агентов: Claude Code, Codex, Cursor)
     #[arg(long)]
     mcp: bool,
@@ -43,6 +47,7 @@ async fn main() -> anyhow::Result<()> {
         None => Pipeline::new(),
     };
     let server = ProxyServer::new(bus.clone(), pipeline).with_mitm();
+    let server = if let Some(p) = &cli.bp { server.with_breakpoints(p) } else { server };
 
     let mut events = bus.subscribe();
     let store = rproxy_mcp::Store::new();

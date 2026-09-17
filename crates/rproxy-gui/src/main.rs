@@ -2,6 +2,7 @@ use eframe::egui;
 use egui::{Color32, RichText};
 use rproxy_core::{EventBus, ProxyEvent, ProxyServer};
 use std::sync::mpsc::{channel, Receiver};
+use std::sync::Arc;
 use std::time::SystemTime;
 
 const BG: Color32 = Color32::from_rgb(0x2B, 0x2B, 0x2B);
@@ -12,10 +13,12 @@ const DIM: Color32 = Color32::from_rgb(0x8A, 0x8A, 0x8A);
 
 fn main() -> eframe::Result<()> {
     let port: u16 = std::env::var("RPROXY_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(8888);
-    let (tx, rx) = channel::<rproxy_core::Exchange>();
+    let (tx, rx) = channel::<GuiEv>();
     let bus = EventBus::new();
+    let bp_hub = Arc::new(rproxy_core::BreakpointHub::default());
 
     let bus2 = bus.clone();
+    let hub2 = bp_hub.clone();
     std::thread::Builder::new().name("rproxy-engine".into()).spawn(move || {
         let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("tokio");
         rt.block_on(async move {
@@ -23,14 +26,17 @@ fn main() -> eframe::Result<()> {
             tokio::spawn(async move {
                 loop {
                     match sub.recv().await {
-                        Ok(ProxyEvent::ExchangeCompleted(ex)) => { let _ = tx.send(ex); }
+                        Ok(ProxyEvent::ExchangeCompleted(ex)) => { let _ = tx.send(GuiEv::Done(ex)); }
+                        Ok(ProxyEvent::BreakpointHit(ex)) => { let _ = tx.send(GuiEv::Bp(ex)); }
                         Ok(_) => {}
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                         Err(_) => continue,
                     }
                 }
             });
-            let server = ProxyServer::new(bus2, rproxy_core::Pipeline::new()).with_mitm();
+            let server = ProxyServer::new(bus2, rproxy_core::Pipeline::new())
+                .with_mitm()
+                .with_breakpoints_hub(hub2);
             let _ = server.run(&format!("127.0.0.1:{port}")).await;
         });
     }).expect("engine thread");
@@ -45,7 +51,7 @@ fn main() -> eframe::Result<()> {
         },
         Box::new(move |cc| {
             setup_style(&cc.egui_ctx);
-            Ok(Box::new(App::new(rx, port)))
+            Ok(Box::new(App::new(rx, port, bp_hub)))
         }),
     )
 }
@@ -109,7 +115,16 @@ struct App {
     hosts: Vec<Host>,
     exchanges: Vec<rproxy_core::Exchange>,
     about: bool,
-    rx: Receiver<rproxy_core::Exchange>,
+    bp_hub: Arc<rproxy_core::BreakpointHub>,
+    bp_on: bool,
+    bp_pattern: String,
+    pending_bp: Vec<Row>,
+    rx: Receiver<GuiEv>,
+}
+
+enum GuiEv {
+    Done(rproxy_core::Exchange),
+    Bp(rproxy_core::Exchange),
 }
 
 fn now_str() -> String {
@@ -189,19 +204,25 @@ impl Row {
 }
 
 impl App {
-    fn new(rx: Receiver<rproxy_core::Exchange>, port: u16) -> Self {
+    fn new(rx: Receiver<GuiEv>, port: u16, bp_hub: Arc<rproxy_core::BreakpointHub>) -> Self {
         Self {
             port, recording: true, ssl_hint: true, filter: String::new(), sel_host: None,
             tab: Tab::Overview, sel_row: None, body_pretty: true, rows: Vec::new(),
-            hosts: Vec::new(), exchanges: Vec::new(), about: false, rx,
+            hosts: Vec::new(), exchanges: Vec::new(), about: false,
+            bp_hub: bp_hub.clone(), bp_on: false, bp_pattern: String::new(),
+            pending_bp: Vec::new(), rx,
         }
     }
 
     fn poll(&mut self) {
-        while let Ok(ex) = self.rx.try_recv() {
-            if self.recording {
-                self.rows.push(Row::from(&ex));
-                self.exchanges.push(ex);
+        while let Ok(ev) = self.rx.try_recv() {
+            match ev {
+                GuiEv::Done(ex) if self.recording => {
+                    self.rows.push(Row::from(&ex));
+                    self.exchanges.push(ex);
+                }
+                GuiEv::Done(_) => {}
+                GuiEv::Bp(ex) => self.pending_bp.push(Row::from(&ex)),
             }
         }
         self.hosts.clear();
@@ -250,6 +271,9 @@ impl eframe::App for App {
                 ui.label(format!("Proxy: http://127.0.0.1:{}", self.port));
                 ui.label("MITM HTTPS: enabled (CA in %USERPROFILE%\\.rproxy\\ca.cert.pem)");
             });
+        }
+        if !self.pending_bp.is_empty() || self.bp_on {
+            self.breakpoints_window(ctx);
         }
         if self.recording {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
@@ -328,7 +352,10 @@ impl App {
                 let rec = if self.recording { "⏸" } else { "⏺" };
                 if ui.button(rec).on_hover_text("Record").clicked() { self.recording = !self.recording; }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("⛔").on_hover_text("Breakpoints (M6)").clicked() {}
+                    if ui.button("⛔").on_hover_text("Breakpoints").clicked() {
+                    self.bp_on = !self.bp_on;
+                    self.bp_hub.set_enabled(self.bp_on);
+                }
                     if ui.button("🐢").on_hover_text("Throttle (M8)").clicked() {}
                     ui.separator();
                     if ui.button("💾").on_hover_text("Save session as HAR").clicked() {
@@ -344,6 +371,65 @@ impl App {
         });
     }
 
+
+    fn breakpoints_window(&mut self, ctx: &egui::Context) {
+        egui::Window::new(RichText::new(format!("⏸ Breakpoints ({})", self.pending_bp.len())))
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .resizable(false)
+            .collapsible(false)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("URL contains:");
+                    if ui
+                        .add(
+                            egui::TextEdit::singleline(&mut self.bp_pattern)
+                                .hint_text("api.test")
+                                .desired_width(160.0),
+                        )
+                        .changed()
+                    {
+                        self.bp_hub.set_pattern(self.bp_pattern.clone());
+                    }
+                    ui.checkbox(&mut self.bp_on, "Enabled").changed();
+                });
+                ui.separator();
+
+                let mut decisions: Vec<(u32, rproxy_core::BreakpointDecision)> = Vec::new();
+                for r in &self.pending_bp {
+                    ui.horizontal(|ui| {
+                        ui.monospace(RichText::new(format!("{} {}", r.method, r.url())).color(TEXT));
+                        if ui.button("▶ Continue").clicked() {
+                            decisions.push((r.id, rproxy_core::BreakpointDecision::Continue));
+                        }
+                        if ui.button("✖ Drop").clicked() {
+                            decisions.push((r.id, rproxy_core::BreakpointDecision::Drop));
+                        }
+                    });
+                }
+                if !self.pending_bp.is_empty() {
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        if ui.button("Continue all").clicked() {
+                            for r in &self.pending_bp {
+                                decisions.push((r.id, rproxy_core::BreakpointDecision::Continue));
+                            }
+                        }
+                        if ui.button("Drop all").clicked() {
+                            for r in &self.pending_bp {
+                                decisions.push((r.id, rproxy_core::BreakpointDecision::Drop));
+                            }
+                        }
+                    });
+                }
+                if self.pending_bp.is_empty() {
+                    ui.weak("Held requests appear here when they match the pattern.");
+                }
+                for (id, d) in decisions {
+                    self.bp_hub.resolve(id as u64, d);
+                    self.pending_bp.retain(|r| r.id != id);
+                }
+            });
+    }
 
     fn tree(&mut self, ui: &mut egui::Ui) {
         let hosts = self.hosts.clone();

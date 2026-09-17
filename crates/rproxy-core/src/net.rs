@@ -157,6 +157,7 @@ struct ProxyState {
     next_exchange_id: AtomicU64,
     next_connection_id: AtomicU64,
     mitm: Option<Arc<MitmState>>,
+    breakpoints: Arc<crate::breakpoints::BreakpointHub>,
 }
 
 impl ProxyState {
@@ -170,6 +171,7 @@ pub struct ProxyServer {
     bus: EventBus,
     pipeline: Arc<Pipeline>,
     mitm: Option<Arc<MitmState>>,
+    breakpoints: Arc<crate::breakpoints::BreakpointHub>,
 }
 
 impl Default for ProxyServer {
@@ -184,6 +186,7 @@ impl ProxyServer {
             bus,
             pipeline: Arc::new(pipeline),
             mitm: None,
+            breakpoints: Arc::new(crate::breakpoints::BreakpointHub::default()),
         }
     }
 
@@ -193,6 +196,17 @@ impl ProxyServer {
             Ok(m) => self.mitm = Some(Arc::new(m)),
             Err(e) => eprintln!("[rproxy] MITM недоступен, продолжаем passthrough: {e}"),
         }
+        self
+    }
+
+    /// Breakpoints с готовым паттерном (включены сразу).
+    pub fn with_breakpoints(self, pattern: &str) -> Self {
+        self.with_breakpoints_hub(Arc::new(crate::breakpoints::BreakpointHub::new(pattern, true)))
+    }
+
+    /// Подменить хаб breakpoints (общий с UI: GUI/CLI-поток управляет в рантайме).
+    pub fn with_breakpoints_hub(mut self, hub: Arc<crate::breakpoints::BreakpointHub>) -> Self {
+        self.breakpoints = hub;
         self
     }
 
@@ -215,6 +229,7 @@ impl ProxyServer {
             next_exchange_id: AtomicU64::new(1),
             next_connection_id: AtomicU64::new(1),
             mitm: self.mitm,
+            breakpoints: self.breakpoints,
         });
 
         loop {
@@ -316,6 +331,23 @@ fn finish_exchange(state: &ProxyState, mut exchange: Exchange, state_: ExchangeS
     exchange.timing.completed_at = Some(Instant::now());
     state.bus.publish(ProxyEvent::ExchangeCompleted(exchange));
 }
+
+/// Breakpoints: если URI совпал — публикуем BreakpointHit и ждём решения оператора.
+async fn hold_if_breakpoint(
+    state: &ProxyState,
+    exchange: &Exchange,
+    req: &HttpRequest,
+) -> Option<crate::breakpoints::BreakpointDecision> {
+    let bp = &state.breakpoints;
+    if !bp.should_hold(&req.uri) {
+        return None;
+    }
+    let (tx, rx) = tokio::sync::oneshot::channel::<crate::breakpoints::BreakpointDecision>();
+    bp.register(exchange.id.0, tx);
+    state.bus.publish(ProxyEvent::BreakpointHit(exchange.clone()));
+    rx.await.ok()
+}
+
 
 // ---------------- CONNECT tunnel passthrough ----------------
 
@@ -442,9 +474,16 @@ async fn handle_forward(
             return Ok(empty_response(status));
         }
         InterceptAction::Hold => {
-            // Breakpoints — этап M6; пока трактуем как continue.
+            // Breakpoints — M6; трактуем как continue (hold делается ниже по хабу).
         }
         InterceptAction::Continue => {}
+    }
+
+    if let Some(crate::breakpoints::BreakpointDecision::Drop) =
+        hold_if_breakpoint(&state, &exchange, &model_req).await
+    {
+        finish_exchange(&state, exchange, ExchangeState::Blocked);
+        return Ok(empty_response(403));
     }
 
     // Буферизуем тело запроса (лимит BODY_CAPTURE_LIMIT).
@@ -638,6 +677,13 @@ async fn forward_https_decrypted(
     if let InterceptAction::Block { status } = action {
         finish_exchange(&state, exchange, ExchangeState::Blocked);
         return Ok(empty_response(status));
+    }
+
+    if let Some(crate::breakpoints::BreakpointDecision::Drop) =
+        hold_if_breakpoint(&state, &exchange, &model_req).await
+    {
+        finish_exchange(&state, exchange, ExchangeState::Blocked);
+        return Ok(empty_response(403));
     }
 
     // Буферизуем тело запроса.

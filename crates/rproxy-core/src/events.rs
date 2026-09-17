@@ -1,7 +1,7 @@
 //! Событийная шина (tech-plan.md §3.4).
 //! `tokio::sync::broadcast` — GUI/CLI/экспортёры подписываются на ProxyEvent.
 
-use crate::model::{ConnectionId, Exchange, ExchangeId};
+use crate::model::{ConnectionId, Exchange};
 use tokio::sync::broadcast;
 
 #[derive(Debug, Clone)]
@@ -11,7 +11,7 @@ pub enum ProxyEvent {
     ExchangeCompleted(Exchange),
     ConnectionOpened(ConnectionId),
     ConnectionClosed(ConnectionId),
-    BreakpointHit(ExchangeId),
+    BreakpointHit(Exchange),
     Error(String),
 }
 
