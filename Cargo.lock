@@ -3128,8 +3128,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "rproxy-cert",
  "rproxy-core",
  "rproxy-export",
+ "rproxy-mcp",
  "tokio",
 ]
 
@@ -3174,6 +3176,19 @@ dependencies = [
  "rproxy-cert",
  "rproxy-core",
  "rproxy-export",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "rproxy-mcp"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "rproxy-core",
  "serde_json",
  "tokio",
 ]

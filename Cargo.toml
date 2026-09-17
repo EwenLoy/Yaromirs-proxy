@@ -5,6 +5,7 @@ members = [
     "crates/rproxy-cert",
     "crates/rproxy-cli",
     "crates/rproxy-export",
+    "crates/rproxy-mcp",
     "crates/rproxy-gui",
 ]
 

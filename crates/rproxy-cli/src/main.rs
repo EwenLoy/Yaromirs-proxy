@@ -2,7 +2,7 @@
 //! M0/M2: `rproxy run --port 8888` — forward proxy с построчным логом exchanges.
 
 use clap::Parser;
-use rproxy_core::{EventBus, Exchange, ProxyEvent, ProxyServer, pipeline::Pipeline};
+use rproxy_core::{EventBus, ProxyEvent, ProxyServer, pipeline::Pipeline};
 
 #[derive(Parser, Debug)]
 #[command(name = "rproxy", version, about = "Открытый аналог Charles Proxy")]
@@ -18,6 +18,10 @@ struct Cli {
     /// Записать сессию в HAR-файл при выходе (Ctrl+C)
     #[arg(long)]
     har: Option<String>,
+
+    /// Поднять MCP-сервер на stdio (для AI-агентов: Claude Code, Codex, Cursor)
+    #[arg(long)]
+    mcp: bool,
 }
 
 #[tokio::main]
@@ -28,11 +32,12 @@ async fn main() -> anyhow::Result<()> {
     let pipeline = Pipeline::new();
     let server = ProxyServer::new(bus.clone(), pipeline).with_mitm();
 
-    // Подписчик: построчный лог + сбор сессии для --har.
     let mut events = bus.subscribe();
+    let store = rproxy_mcp::Store::new();
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-    let recorder = tokio::spawn(async move {
-        let mut session: Vec<Exchange> = Vec::new();
+    let session_for_har = store.clone();
+    let session_store = store.clone();
+    let _recorder = tokio::spawn(async move {
         loop {
             tokio::select! {
                 ev = events.recv() => match ev {
@@ -51,8 +56,10 @@ async fn main() -> anyhow::Result<()> {
                             .total()
                             .map(|d| format!("{d:?}"))
                             .unwrap_or_else(|| "-".into());
-                        println!("{method} {uri} -> {status} ({dur}) [{:?}]", ex.state);
-                        session.push(ex);
+                        eprintln!("{method} {uri} -> {status} ({dur})");
+                        if session_store.is_recording() {
+                            session_store.session.lock().unwrap().push(ex);
+                        }
                     }
                     Ok(ProxyEvent::Error(msg)) => eprintln!("[error] {msg}"),
                     Ok(_) => {}
@@ -64,25 +71,35 @@ async fn main() -> anyhow::Result<()> {
                 _ = &mut shutdown_rx => break,
             }
         }
-        session
     });
 
     let addr = format!("{}:{}", cli.bind, cli.port);
-    println!("rproxy listening on http://{addr} (HTTP + MITM HTTPS)");
-    println!("Нажми Ctrl+C для выхода{}", if cli.har.is_some() { " — сессия сохранится в HAR" } else { "" });
+    eprintln!("rproxy listening on http://{addr} (HTTP + MITM HTTPS)");
+    if cli.mcp {
+        eprintln!("MCP server on stdio (tools: get_flows, get_flow, export_flow_curl, toggle_recording, clear_session, get_status)");
+    }
 
-    // Ждём Ctrl+C, затем корректно пишем HAR.
-    tokio::signal::ctrl_c().await?;
-    eprintln!("\n[rproxy] завершение...");
+    // MCP-режим: живём, пока открыт stdin агента; иначе — до Ctrl+C.
+    if cli.mcp {
+        rproxy_mcp::serve(store).await?;
+    } else {
+        tokio::signal::ctrl_c().await?;
+        eprintln!("\n[rproxy] завершение...");
+    }
+
     let _ = shutdown_tx.send(());
-    // даём дочитать последние события, прилетевшие до shutdown
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
     drop(server);
     drop(bus);
+
     if let Some(path) = cli.har {
-        let session = recorder.await.unwrap_or_default();
+        let session = {
+            // даём рекордеру дочитать хвост и забираем сессию из store
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            session_for_har.session.lock().unwrap().clone()
+        };
         rproxy_export::write_har(&path, &session)?;
-        println!("[rproxy] сессия сохранена в {path} ({} exchanges)", session.len());
+        eprintln!("[rproxy] сессия сохранена в {path} ({} exchanges)", session.len());
     }
     Ok(())
 }

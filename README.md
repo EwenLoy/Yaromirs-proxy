@@ -61,8 +61,26 @@ cd Yaromirs-proxy
 cargo run -p rproxy-gui
 
 # or headless daemon
-cargo run -p rproxy-cli -- run --port 8888
+cargo run -p rproxy-cli -- --port 8888
+
+# daemon with MCP server for AI agents (Claude Code, Codex, Cursor)
+cargo run -p rproxy-cli -- --port 8888 --mcp
 ```
+
+### MCP — proxy for AI agents
+
+`rproxy` is **headless by design**: an AI agent can drive the proxy without any GUI —
+locally, in CI, in Docker or over SSH (unlike Proxyman/Charles, whose MCP requires an
+open desktop app).
+
+```bash
+claude mcp add rproxy -- rproxy --port 8888 --mcp
+```
+
+Tools exposed to the agent: `get_flows` (list/filter), `get_flow` (headers + bodies),
+`export_flow_curl`, `toggle_recording`, `clear_session`, `get_status`.
+Example prompt for your agent: *"Run rproxy, capture the traffic of my test suite and
+show me every request that returned 5xx with its response body."*
 
 Direct traffic through the proxy:
 

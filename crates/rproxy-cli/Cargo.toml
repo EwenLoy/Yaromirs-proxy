@@ -9,7 +9,9 @@ path = "src/main.rs"
 
 [dependencies]
 rproxy-core = { path = "../rproxy-core" }
+rproxy-cert = { path = "../rproxy-cert" }
 rproxy-export = { path = "../rproxy-export" }
+rproxy-mcp = { path = "../rproxy-mcp" }
 tokio.workspace = true
 clap.workspace = true
 anyhow = "1"
