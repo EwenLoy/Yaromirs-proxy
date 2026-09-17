@@ -43,8 +43,8 @@ impl CertAuthority {
     pub fn generate() -> Result<Self, rcgen::Error> {
         let mut params = CertificateParams::new(Vec::<String>::new())?;
         params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-        params.distinguished_name.push(DnType::CommonName, "rproxy Root CA");
-        params.distinguished_name.push(DnType::OrganizationName, "rproxy");
+        params.distinguished_name.push(DnType::CommonName, "Charles Clone Root CA");
+        params.distinguished_name.push(DnType::OrganizationName, "Charles Clone");
         params.key_usages = vec![
             KeyUsagePurpose::KeyCertSign,
             KeyUsagePurpose::CrlSign,

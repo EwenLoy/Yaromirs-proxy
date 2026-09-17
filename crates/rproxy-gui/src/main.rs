@@ -119,6 +119,8 @@ struct App {
     hosts: Vec<Host>,
     exchanges: Vec<rproxy_core::Exchange>,
     about: bool,
+    install_win: bool,
+    install_msg: Option<String>,
     bp_hub: Arc<rproxy_core::BreakpointHub>,
     bp_on: bool,
     bp_pattern: String,
@@ -213,6 +215,7 @@ impl App {
             port, recording: true, ssl_hint: true, filter: String::new(), sel_host: None,
             tab: Tab::Overview, sel_row: None, body_pretty: true, rows: Vec::new(),
             hosts: Vec::new(), exchanges: Vec::new(), about: false,
+            install_win: false, install_msg: None,
             bp_hub: bp_hub.clone(), bp_on: false, bp_pattern: String::new(),
             pending_bp: Vec::new(), rx,
         }
@@ -268,6 +271,9 @@ impl eframe::App for App {
             .show(ctx, |ui| self.tree(ui));
         self.status_bar(ctx);
         egui::CentralPanel::default().show(ctx, |ui| self.central(ui));
+        if self.install_win {
+            self.install_window(ctx);
+        }
         if self.about {
             egui::Window::new("About rproxy").collapsible(false).show(ctx, |ui| {
                 ui.label(RichText::new("rproxy").heading());
@@ -328,6 +334,10 @@ impl App {
                 });
                 ui.menu_button("Help", |ui| {
                     if ui.button("About rproxy").clicked() { self.about = true; ui.close_menu(); }
+                    if ui.button("Install root certificate…").clicked() {
+                        self.install_win = true;
+                        ui.close_menu();
+                    }
                     if ui.button("Save CA certificate…").clicked() {
                         match save_ca() {
                             Ok(p) => println!("[rproxy] CA saved: {}", p.display()),
@@ -375,6 +385,73 @@ impl App {
         });
     }
 
+
+    fn install_window(&mut self, ctx: &egui::Context) {
+        let ca = ca_file();
+        egui::Window::new("Install root certificate")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.label(RichText::new("Charles Clone Root CA").heading());
+                match &ca {
+                    Ok(path) => {
+                        ui.horizontal(|ui| {
+                            ui.weak("File:");
+                            ui.monospace(path.display().to_string());
+                        });
+                    }
+                    Err(e) => {
+                        ui.colored_label(Color32::from_rgb(0xD0, 0x40, 0x3A), format!("CA not found: {e}"));
+                    }
+                }
+                if let Some(msg) = &self.install_msg {
+                    ui.add_space(4.0);
+                    ui.label(RichText::new(msg.clone()).color(Color32::from_rgb(0x2E, 0x9E, 0x4B)));
+                }
+                ui.separator();
+
+                let Ok(path) = ca else {
+                    if ui.button("Close").clicked() { self.install_win = false; }
+                    return;
+                };
+
+                ui.add_enabled_ui(true, |ui| {
+                    if ui.button("🚀 Auto install (adds to Trusted Root via UAC)").clicked() {
+                        match install_ca_auto(&path) {
+                            Ok(()) => {
+                                self.install_msg = Some(
+                                    "Started: confirm the UAC prompt. The console window will show the certutil result.".into(),
+                                );
+                            }
+                            Err(e) => {
+                                self.install_msg = Some(format!("Failed to start: {e}"));
+                            }
+                        }
+                    }
+                });
+
+                ui.add_space(4.0);
+                ui.label(RichText::new("Manual mode:").strong());
+                ui.label("1. Open the file location");
+                ui.label("2. Double-click charles-clone.cer → Install Certificate");
+                ui.label("3. Local Machine → Place in: Trusted Root Certification Authorities");
+                ui.horizontal(|ui| {
+                    if ui.button("📂 Open file location").clicked() {
+                        let _ = std::process::Command::new("explorer")
+                            .arg(format!("/select,{}", path.display()))
+                            .spawn();
+                    }
+                    if ui.button("📋 Copy path").clicked() {
+                        ctx.copy_text(path.display().to_string());
+                        self.install_msg = Some("Path copied".into());
+                    }
+                    if ui.button("Close").clicked() {
+                        self.install_win = false;
+                    }
+                });
+            });
+    }
 
     fn breakpoints_window(&mut self, ctx: &egui::Context) {
         egui::Window::new(RichText::new(format!("⏸ Breakpoints ({})", self.pending_bp.len())))
@@ -670,6 +747,28 @@ impl App {
             }
         }
     }
+}
+
+/// Файл CA с именем charles-clone (создаётся из ca.cert.pem при первом обращении).
+fn ca_file() -> std::io::Result<std::path::PathBuf> {
+    let dir = rproxy_cert::default_ca_dir().ok_or_else(|| std::io::Error::other("no home dir"))?;
+    let cer = dir.join("charles-clone.cer");
+    if !cer.exists() {
+        std::fs::copy(dir.join("ca.cert.pem"), &cer)?;
+    }
+    Ok(cer)
+}
+
+/// Auto: элевированный certutil добавляет CA в Trusted Root.
+fn install_ca_auto(path: &std::path::Path) -> std::io::Result<()> {
+    let cmd = format!(
+        "Start-Process certutil -ArgumentList '-addstore','-f','Root','{}' -Verb RunAs -Wait",
+        path.display()
+    );
+    std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command", &cmd])
+        .spawn()?;
+    Ok(())
 }
 
 fn section(ui: &mut egui::Ui, label: &str) {
