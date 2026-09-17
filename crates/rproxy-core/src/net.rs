@@ -24,7 +24,8 @@ use tokio_rustls::{TlsAcceptor, TlsConnector};
 
 use crate::events::{EventBus, ProxyEvent};
 use crate::model::{
-    ConnectionId, Exchange, ExchangeCtx, ExchangeId, ExchangeState, HttpRequest, Protocol,
+    ConnectionId, Exchange, ExchangeCtx, ExchangeId, ExchangeState, HttpResponse, HttpRequest,
+    Protocol,
 };
 use crate::pipeline::{InterceptAction, Pipeline};
 
@@ -298,18 +299,15 @@ fn content_type_of(headers: &[(String, String)]) -> Option<String> {
         .map(|(_, v)| v.clone())
 }
 
-/// Записывает в exchange метаданные ответа + тело, публикует Completed.
-fn finish_with_response(state: &ProxyState, mut exchange: Exchange, rparts: &http::response::Parts, body: Bytes) {
-    exchange.response_status = Some(rparts.status.as_u16());
-    exchange.response_headers = rparts
-        .headers
-        .iter()
-        .map(|(k, v)| (k.as_str().into(), v.to_str().unwrap_or("").into()))
-        .collect();
-    exchange.response_content_type = content_type_of(&exchange.response_headers);
-    exchange.response_body = Some(body.clone());
-    exchange.response_body_decoded = decode_body(&exchange.response_headers, &body);
-    finish_exchange(state, exchange, ExchangeState::Complete);
+/// Ответ клиенту из model-структуры (после response-интерцепторов).
+fn build_hyper_response(m: &HttpResponse) -> HyperResponse {
+    let mut builder = hyper::Response::builder().status(m.status);
+    for (k, v) in &m.headers {
+        builder = builder.header(k, v);
+    }
+    builder
+        .body(Either::Right(Full::new(m.body.clone())))
+        .unwrap_or_else(|_| empty_response(500))
 }
 
 
@@ -421,9 +419,10 @@ async fn handle_forward(
     });
     state.bus.publish(ProxyEvent::ExchangeStarted(exchange.clone()));
 
-    // Прогон через pipeline (M0: пустой по умолчанию; тулы подключаются сюда).
+    // Прогон через pipeline (тулы: Block, Map Local/Remote, Rewrite и т.д.).
     let ctx = ExchangeCtx {
         exchange_id: exchange_id.0,
+        url: exchange.request.clone().map(|r| r.uri).unwrap_or_default(),
     };
     let mut model_req = exchange.request.clone().unwrap();
     let action = state.pipeline.process_request(&mut model_req, &ctx).await;
@@ -480,9 +479,26 @@ async fn handle_forward(
         Ok(resp) => {
             let (rparts, rbody) = resp.into_parts();
             let (resp_bytes, _) = capture_body(rbody).await;
-            let response = http::Response::from_parts(rparts.clone(), Either::Right(Full::new(resp_bytes.clone())));
-            finish_with_response(&state, exchange, &rparts, resp_bytes);
-            Ok(response)
+            let mut m = HttpResponse {
+                status: rparts.status.as_u16(),
+                reason: None,
+                headers: rparts
+                    .headers
+                    .iter()
+                    .map(|(k, v)| (k.as_str().into(), v.to_str().unwrap_or("").into()))
+                    .collect(),
+                body: resp_bytes,
+            };
+            // Response-интерцепторы (No Caching, Block Cookies, Rewrite).
+            let _ = state.pipeline.process_response(&mut m, &ctx).await;
+            let mut ex = exchange;
+            ex.response_status = Some(m.status);
+            ex.response_headers = m.headers.clone();
+            ex.response_content_type = content_type_of(&m.headers);
+            ex.response_body = Some(m.body.clone());
+            ex.response_body_decoded = decode_body(&m.headers, &m.body);
+            finish_exchange(&state, ex, ExchangeState::Complete);
+            Ok(build_hyper_response(&m))
         }
         Err(e) => {
             exchange.error = Some(e.to_string());
@@ -598,7 +614,7 @@ async fn forward_https_decrypted(
 
     exchange.request = Some(HttpRequest {
         method: req.method().as_str().into(),
-        uri: uri_display,
+        uri: uri_display.clone(),
         headers: req
             .headers()
             .iter()
@@ -611,9 +627,14 @@ async fn forward_https_decrypted(
     // Pipeline (тулы), как и для plain HTTP.
     let ctx = ExchangeCtx {
         exchange_id: exchange_id.0,
+        url: uri_display.clone(),
     };
     let mut model_req = exchange.request.clone().unwrap();
     let action = state.pipeline.process_request(&mut model_req, &ctx).await;
+    let ctx = ExchangeCtx {
+        exchange_id: exchange_id.0,
+        url: model_req.uri.clone(), // URL после rewrite — для response-правил
+    };
     if let InterceptAction::Block { status } = action {
         finish_exchange(&state, exchange, ExchangeState::Blocked);
         return Ok(empty_response(status));
@@ -699,9 +720,26 @@ async fn forward_https_decrypted(
         Ok(resp) => {
             let (rparts, rbody) = resp.into_parts();
             let (resp_bytes, _) = capture_body(rbody).await;
-            let response = http::Response::from_parts(rparts.clone(), Either::Right(Full::new(resp_bytes.clone())));
-            finish_with_response(&state, exchange, &rparts, resp_bytes);
-            Ok(response)
+            let mut m = HttpResponse {
+                status: rparts.status.as_u16(),
+                reason: None,
+                headers: rparts
+                    .headers
+                    .iter()
+                    .map(|(k, v)| (k.as_str().into(), v.to_str().unwrap_or("").into()))
+                    .collect(),
+                body: resp_bytes,
+            };
+            // Response-интерцепторы (No Caching, Block Cookies, Rewrite).
+            let _ = state.pipeline.process_response(&mut m, &ctx).await;
+            let mut ex = exchange;
+            ex.response_status = Some(m.status);
+            ex.response_headers = m.headers.clone();
+            ex.response_content_type = content_type_of(&m.headers);
+            ex.response_body = Some(m.body.clone());
+            ex.response_body_decoded = decode_body(&m.headers, &m.body);
+            finish_exchange(&state, ex, ExchangeState::Complete);
+            Ok(build_hyper_response(&m))
         }
         Err(e) => {
             exchange.error = Some(e.to_string());

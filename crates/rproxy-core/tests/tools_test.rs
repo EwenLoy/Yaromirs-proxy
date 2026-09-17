@@ -1,5 +1,9 @@
-//! Тесты M3-тулов: TOML-конфиг + поведение interceptors + e2e через прокси.
+//! Тесты M3/M4-тулов: TOML-конфиг + interceptors + e2e через прокси.
 
+use bytes::Bytes;
+use http_body_util::Full;
+use hyper::service::service_fn;
+use hyper_util::rt::TokioIo;
 use rproxy_core::tools::{load_pipeline, MapLocalRule, Rule, ToolsConfig};
 use rproxy_core::{EventBus, HttpRequest, ProxyEvent, ProxyServer};
 use tokio::net::{TcpListener, TcpStream};
@@ -34,9 +38,10 @@ async fn block_and_map_local_and_map_remote() {
             status: None,
             replace: Some("api.new.com".into()),
         }],
+        rewrite: vec![],
     };
     let pipeline = rproxy_core::tools::build_pipeline(&cfg);
-    let ctx = rproxy_core::ExchangeCtx { exchange_id: 1 };
+    let ctx = rproxy_core::ExchangeCtx { exchange_id: 1, url: String::new() };
 
     // Block
     let mut r = req("http://ads.example.com/x", &[]);
@@ -83,7 +88,57 @@ fn toml_config_parses() {
     let _ = std::fs::remove_file(&dir);
 }
 
-/// E2E: block через реальный прокси — origin не вызывается, клиент получает 403.
+/// Rewrite e2e: принудительный статус + заголовок ответа доходят до клиента.
+#[tokio::test]
+async fn rewrite_response_e2e() {
+    // Origin отдаёт 200 без заголовка.
+    let origin_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = origin_listener.local_addr().unwrap().to_string();
+    tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = origin_listener.accept().await else { break };
+            tokio::spawn(async move {
+                let service = service_fn(|_req: hyper::Request<hyper::body::Incoming>| async {
+                    Ok::<_, std::convert::Infallible>(
+                        hyper::Response::builder().status(200).body(Full::new(Bytes::new())).unwrap(),
+                    )
+                });
+                let _ = hyper::server::conn::http1::Builder::new()
+                    .serve_connection(TokioIo::new(stream), service)
+                    .await;
+            });
+        }
+    });
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy_addr = listener.local_addr().unwrap().to_string();
+    let cfg = ToolsConfig {
+        rewrite: vec![rproxy_core::tools::RewriteRule {
+            pattern: origin.clone(),
+            set_response_headers: Some(
+                [("x-proxy".to_string(), "rproxy".to_string())].into_iter().collect(),
+            ),
+            set_status: Some(202),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let server = ProxyServer::new(EventBus::new(), rproxy_core::tools::build_pipeline(&cfg));
+    tokio::spawn(async move {
+        let _ = server.serve(listener).await;
+    });
+
+    let mut stream = TcpStream::connect(&proxy_addr).await.unwrap();
+    let req = format!("GET http://{origin}/rw HTTP/1.1\r\nHost: {origin}\r\nConnection: close\r\n\r\n");
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    stream.write_all(req.as_bytes()).await.unwrap();
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).await.unwrap();
+    let head = String::from_utf8_lossy(&buf);
+    assert!(head.starts_with("HTTP/1.1 202"), "rewritten status expected, head: {head}");
+    assert!(head.to_lowercase().contains("x-proxy: rproxy"), "rewritten header expected, head: {head}");
+}
+
 #[tokio::test]
 async fn block_tool_e2e() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

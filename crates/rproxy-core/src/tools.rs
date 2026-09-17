@@ -14,6 +14,8 @@ pub struct ToolsConfig {
     #[serde(default)]
     pub block_cookies: bool,
     #[serde(default)]
+    pub rewrite: Vec<RewriteRule>,
+    #[serde(default)]
     pub map_local: Vec<MapLocalRule>,
     #[serde(default)]
     pub map_remote: Vec<Rule>,
@@ -173,8 +175,89 @@ impl RequestInterceptor for BlockCookiesTool {
         InterceptAction::Continue
     }
 }
+// ---------------- Rewrite (M3.1) ----------------
 
-// ---------------- Сборка pipeline из конфига ----------------
+#[derive(Deserialize, Debug, Clone)]
+pub struct UrlReplace {
+    pub from: String,
+    pub to: String,
+}
+
+#[derive(Deserialize, Debug, Clone, Default)]
+pub struct RewriteRule {
+    #[serde(rename = "match")]
+    pub pattern: String,
+    /// Замена подстроки в URL запроса.
+    #[serde(default)]
+    pub url_replace: Option<UrlReplace>,
+    /// Добавить/заменить заголовки запроса.
+    #[serde(default)]
+    pub set_headers: Option<std::collections::BTreeMap<String, String>>,
+    /// Удалить заголовки запроса.
+    #[serde(default)]
+    pub remove_headers: Vec<String>,
+    /// Добавить/заменить заголовки ответа.
+    #[serde(default)]
+    pub set_response_headers: Option<std::collections::BTreeMap<String, String>>,
+    /// Принудительный статус ответа.
+    #[serde(default)]
+    pub set_status: Option<u16>,
+}
+
+pub struct RewriteTool(pub Vec<RewriteRule>);
+
+fn upsert_header(headers: &mut Vec<(String, String)>, key: &str, value: &str) {
+    for (k, v) in headers.iter_mut() {
+        if k.eq_ignore_ascii_case(key) {
+            *v = value.to_string();
+            return;
+        }
+    }
+    headers.push((key.to_string(), value.to_string()));
+}
+
+#[async_trait::async_trait]
+impl RequestInterceptor for RewriteTool {
+    async fn on_request(&self, req: &mut HttpRequest, _ctx: &ExchangeCtx) -> InterceptAction {
+        for r in &self.0 {
+            if !req.uri.contains(&r.pattern) {
+                continue;
+            }
+            if let Some(ur) = &r.url_replace {
+                req.uri = req.uri.replace(&ur.from, &ur.to);
+            }
+            if let Some(set) = &r.set_headers {
+                for (k, v) in set {
+                    upsert_header(&mut req.headers, k, v);
+                }
+            }
+            for h in &r.remove_headers {
+                req.headers.retain(|(k, _)| !k.eq_ignore_ascii_case(h));
+            }
+        }
+        InterceptAction::Continue
+    }
+}
+
+#[async_trait::async_trait]
+impl ResponseInterceptor for RewriteTool {
+    async fn on_response(&self, resp: &mut HttpResponse, ctx: &ExchangeCtx) -> InterceptAction {
+        for r in &self.0 {
+            if !ctx.url.contains(&r.pattern) {
+                continue;
+            }
+            if let Some(set) = &r.set_response_headers {
+                for (k, v) in set {
+                    upsert_header(&mut resp.headers, k, v);
+                }
+            }
+            if let Some(status) = r.set_status {
+                resp.status = status;
+            }
+        }
+        InterceptAction::Continue
+    }
+}
 
 pub fn build_pipeline(cfg: &ToolsConfig) -> Pipeline {
     let mut p = Pipeline::new();
@@ -186,6 +269,10 @@ pub fn build_pipeline(cfg: &ToolsConfig) -> Pipeline {
     }
     if !cfg.map_remote.is_empty() {
         p = p.with_request_interceptor(Box::new(MapRemoteTool(cfg.map_remote.clone())));
+    }
+    if !cfg.rewrite.is_empty() {
+        p = p.with_request_interceptor(Box::new(RewriteTool(cfg.rewrite.clone())));
+        p = p.with_response_interceptor(Box::new(RewriteTool(cfg.rewrite.clone())));
     }
     if cfg.no_caching {
         p = p.with_request_interceptor(Box::new(NoCachingTool));
@@ -223,6 +310,13 @@ content_type = "application/json"
 [[map_remote]]
 match = "api.old.com"
 replace = "api.new.com"
+
+# Rewrite: правка заголовков/статуса по фильтру URL
+[[rewrite]]
+match = "api.new.com"
+set_headers = { "X-Debug" = "1" }
+set_response_headers = { "X-Proxy" = "rproxy" }
+remove_headers = ["accept-encoding"]
 "#
 }
 

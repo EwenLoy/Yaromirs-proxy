@@ -33,10 +33,11 @@ pub enum ExchangeState {
     BreakpointHeld,
 }
 
-/// Контекст обмена (пока минимальный; расширится в M1+ — TLS info, connection и т.д.).
+/// Контекст обмена (M1+: URL после request-pipeline — для response-правил).
 #[derive(Debug, Clone)]
 pub struct ExchangeCtx {
     pub exchange_id: u64,
+    pub url: String,
 }
 
 /// Легковесное описание входящего запроса (без тела — для M0).

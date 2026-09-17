@@ -54,6 +54,8 @@ struct Row {
     status: u16,
     time: String,
     duration: String,
+    req_headers: Vec<(String, String)>,
+    resp_headers: Vec<(String, String)>,
     req_body: Option<String>,
     resp_body: Option<String>,
     content_type: Option<String>,
@@ -77,6 +79,7 @@ struct App {
     sel_host: Option<String>,
     tab: Tab,
     sel_row: Option<u32>,
+    body_pretty: bool,
     rows: Vec<Row>,
     hosts: Vec<Host>,
     exchanges: Vec<rproxy_core::Exchange>,
@@ -129,6 +132,8 @@ impl Row {
             status: ex.response_status.unwrap_or(0),
             time: now_str(),
             duration: ex.timing.total().map(|d| format!("{d:.1?}")).unwrap_or_else(|| "-".into()),
+            req_headers: ex.request.as_ref().map(|r| r.headers.clone()).unwrap_or_default(),
+            resp_headers: ex.response_headers.clone(),
             req_body: Self::body_str(&ex.request_body),
             resp_body: resp.cloned().and_then(|b| Self::body_str(&Some(b))),
             content_type: ex.response_content_type.clone(),
@@ -149,13 +154,17 @@ impl Row {
     fn url(&self) -> String {
         format!("{}://{}{}", if self.locked { "https" } else { "http" }, self.host, self.path)
     }
+
+    fn is_json(&self) -> bool {
+        self.content_type.as_deref().map_or(false, |ct| ct.contains("json"))
+    }
 }
 
 impl App {
     fn new(rx: Receiver<rproxy_core::Exchange>, port: u16) -> Self {
         Self {
             port, recording: true, ssl_hint: true, filter: String::new(), sel_host: None,
-            tab: Tab::Overview, sel_row: None, rows: Vec::new(), hosts: Vec::new(),
+            tab: Tab::Overview, sel_row: None, body_pretty: true, rows: Vec::new(), hosts: Vec::new(),
             exchanges: Vec::new(), about: false, rx,
         }
     }
@@ -184,7 +193,11 @@ impl App {
             .filter(|r| f.is_empty()
                 || r.host.to_lowercase().contains(&f)
                 || r.path.to_lowercase().contains(&f)
-                || r.method.to_lowercase().contains(&f))
+                || r.method.to_lowercase().contains(&f)
+                || (f.len() >= 3 && (
+                    r.req_body.as_deref().map_or(false, |b| b.to_lowercase().contains(&f))
+                        || r.resp_body.as_deref().map_or(false, |b| b.to_lowercase().contains(&f))
+                )))
             .collect()
     }
 }
@@ -404,9 +417,13 @@ impl App {
             for (t, l) in [(Tab::Overview, "Overview"), (Tab::Request, "Request"), (Tab::Response, "Response"), (Tab::Timing, "Timing")] {
                 if ui.selectable_label(self.tab == t, l).clicked() { self.tab = t; }
             }
+            if matches!(self.tab, Tab::Request | Tab::Response) {
+                ui.separator();
+                ui.checkbox(&mut self.body_pretty, "Pretty");
+            }
         });
         ui.separator();
-        let Some(r) = self.rows.iter().find(|r| Some(r.id) == self.sel_row) else {
+        let Some(r) = self.rows.iter().find(|r| Some(r.id) == self.sel_row).cloned() else {
             ui.weak("Выберите запрос в таблице");
             return;
         };
@@ -422,24 +439,77 @@ impl App {
             }
             Tab::Request => {
                 ui.monospace(format!("{} {} HTTP/1.1", r.method, r.path));
-                ui.monospace(format!("Host: {}", r.host));
                 ui.separator();
-                ui.weak("Body:");
-                ui.monospace(Row::pretty_body(&r.req_body, &None));
-            }
-            Tab::Response => {
-                ui.monospace(format!("HTTP/1.1 {}", r.status));
-                if let Some(ct) = &r.content_type {
-                    ui.weak(format!("Content-Type: {ct}"));
+                ui.weak("Headers:");
+                for (k, v) in &r.req_headers {
+                    ui.monospace(format!("{k}: {v}"));
                 }
                 ui.separator();
                 ui.weak("Body:");
+                if r.req_body.is_some() {
+                    ui.monospace(Row::pretty_body(&r.req_body, &None));
+                } else {
+                    ui.weak("(пусто)");
+                }
+            }
+            Tab::Response => {
+                ui.monospace(format!("HTTP/1.1 {}", r.status));
+                ui.separator();
+                ui.weak("Headers:");
+                for (k, v) in &r.resp_headers {
+                    ui.monospace(format!("{k}: {v}"));
+                }
+                ui.separator();
+                ui.weak("Body:");
+                if self.body_pretty && r.is_json() {
+                    if let Some(text) = &r.resp_body {
+                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(text) {
+                            App::json_tree(ui, "", &v, 0);
+                            return;
+                        }
+                    }
+                }
                 ui.monospace(Row::pretty_body(&r.resp_body, &r.content_type));
             }
             Tab::Timing => {
                 ui.monospace(format!("Total: {}", r.duration));
             }
         });
+    }
+
+    fn json_tree(ui: &mut egui::Ui, key: &str, value: &serde_json::Value, depth: usize) {
+        if depth > 20 {
+            ui.weak("…");
+            return;
+        }
+        match value {
+            serde_json::Value::Object(map) => {
+                egui::CollapsingHeader::new(format!("📁 {key} {{{}}}", map.len()))
+                    .default_open(depth < 2)
+                    .show(ui, |ui| {
+                        for (k, v) in map { Self::json_tree(ui, k, v, depth + 1); }
+                    });
+            }
+            serde_json::Value::Array(arr) => {
+                egui::CollapsingHeader::new(format!("📁 {key} [{}]", arr.len()))
+                    .default_open(depth < 2)
+                    .show(ui, |ui| {
+                        for (i, v) in arr.iter().enumerate() {
+                            Self::json_tree(ui, &i.to_string(), v, depth + 1);
+                        }
+                    });
+            }
+            other => {
+                let text = match other {
+                    serde_json::Value::String(s) => s.clone(),
+                    o => o.to_string(),
+                };
+                ui.horizontal(|ui| {
+                    if !key.is_empty() { ui.weak(format!("{key}:")); }
+                    ui.monospace(text);
+                });
+            }
+        }
     }
 }
 
