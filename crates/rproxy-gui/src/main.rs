@@ -1711,19 +1711,18 @@ Install it once and browsers will trust captured traffic.",
         if t.root.children.is_empty() {
             return;
         }
-        egui::CollapsingHeader::new(RichText::new("Structure").color(DIM))
-            .id_salt(format!("root|{}", t.host))
-            .default_open(true)
-            .show(ui, |ui| {
-                let mut clicked: Option<(String, String)> = None;
-                for child in &t.root.children {
-                    self.node_row(ui, t, child, String::new(), &mut clicked);
-                }
-                if let Some(c) = clicked {
-                    self.sel_host = Some(c);
-                    self.sel_row = None;
-                }
-            });
+        // Как в Charles: под хостом сразу дерево путей, без промежуточной
+        // подписи «Structure» — она только сбивает.
+        let mut clicked: Option<(String, String)> = None;
+        ui.indent(("paths", &t.host), |ui| {
+            for child in &t.root.children {
+                self.node_row(ui, t, child, String::new(), &mut clicked);
+            }
+        });
+        if let Some(c) = clicked {
+            self.sel_host = Some(c);
+            self.sel_row = None;
+        }
     }
 
     fn node_row(
@@ -1743,12 +1742,17 @@ Install it once and browsers will trust captured traffic.",
             .map_or(false, |(h, p)| h == &t.host && p == &path);
 
         if is_leaf {
-            let label = RichText::new(node.name.clone())
-                .color(if selected { Color32::WHITE } else { TEXT });
-            if ui.selectable_label(selected, label).clicked() {
-                *clicked = Some((t.host.clone(), path));
-            }
-            ui.weak(RichText::new(node.count.to_string()).color(DIM));
+            // Счётчик — справа на той же строке (раньше он падал на отдельную строку).
+            ui.horizontal(|ui| {
+                let label = RichText::new(node.name.clone())
+                    .color(if selected { Color32::WHITE } else { TEXT });
+                if ui.selectable_label(selected, label).clicked() {
+                    *clicked = Some((t.host.clone(), path));
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.weak(RichText::new(node.count.to_string()).color(DIM));
+                });
+            });
         } else {
             egui::CollapsingHeader::new(
                 RichText::new(format!("{} ({})", node.name, node.count))
