@@ -17,6 +17,8 @@ rustls.workspace = true
 rustls-pki-types.workspace = true
 tokio-rustls.workspace = true
 flate2 = "1"
+brotli = "7"
+zstd = "0.13"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 

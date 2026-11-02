@@ -295,22 +295,29 @@ async fn capture_body(body: Incoming) -> (Bytes, bool) {
     }
 }
 
-/// Распаковка gzip/deflate для отображения.
+/// Распаковка gzip/deflate/brotli/zstd для отображения (тело в шине остаётся как есть).
 fn decode_body(headers: &[(String, String)], raw: &[u8]) -> Option<Bytes> {
+    use std::io::Read;
     let enc = headers
         .iter()
         .find(|(k, _)| k.eq_ignore_ascii_case("content-encoding"))
         .map(|(_, v)| v.to_ascii_lowercase())?;
     let out: Option<Vec<u8>> = if enc.contains("gzip") {
-        use std::io::Read;
         let mut d = flate2::read::MultiGzDecoder::new(raw);
         let mut v = Vec::new();
         d.read_to_end(&mut v).ok().map(|_| v)
     } else if enc.contains("deflate") {
-        use std::io::Read;
         let mut d = flate2::read::ZlibDecoder::new(raw);
         let mut v = Vec::new();
         d.read_to_end(&mut v).ok().map(|_| v)
+    } else if enc.contains("br") {
+        let mut v = Vec::new();
+        brotli::Decompressor::new(raw, 4096)
+            .read_to_end(&mut v)
+            .ok()
+            .map(|_| v)
+    } else if enc.contains("zstd") {
+        zstd::stream::decode_all(raw).ok()
     } else {
         None
     };
@@ -853,3 +860,37 @@ async fn forward_https_decrypted(
 }
 
 
+#[cfg(test)]
+mod decode_tests {
+    use super::*;
+    use std::io::Write;
+
+    fn hdr(enc: &str) -> Vec<(String, String)> {
+        vec![("content-encoding".to_string(), enc.to_string())]
+    }
+
+    #[test]
+    fn decodes_gzip_deflate_brotli_zstd() {
+        let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        e.write_all(b"hello gzip").unwrap();
+        let gz = e.finish().unwrap();
+        assert_eq!(decode_body(&hdr("gzip"), &gz).unwrap().as_ref(), b"hello gzip");
+
+        let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        z.write_all(b"hello deflate").unwrap();
+        let df = z.finish().unwrap();
+        assert_eq!(decode_body(&hdr("deflate"), &df).unwrap().as_ref(), b"hello deflate");
+
+        let mut br = Vec::new();
+        {
+            let mut w = brotli::CompressorWriter::new(&mut br, 4096, 5, 22);
+            w.write_all(b"hello brotli").unwrap();
+        }
+        assert_eq!(decode_body(&hdr("br"), &br).unwrap().as_ref(), b"hello brotli");
+
+        let zs = zstd::stream::encode_all(&b"hello zstd"[..], 3).unwrap();
+        assert_eq!(decode_body(&hdr("zstd"), &zs).unwrap().as_ref(), b"hello zstd");
+
+        assert!(decode_body(&hdr("identity"), b"raw").is_none());
+    }
+}

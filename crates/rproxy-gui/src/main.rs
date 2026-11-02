@@ -236,6 +236,7 @@ struct Row {
     req_body: Option<String>,
     resp_body: Option<String>,
     content_type: Option<String>,
+    content_encoding: Option<String>,
 }
 
 #[derive(Clone)]
@@ -485,6 +486,27 @@ fn segmented_view_switch(ui: &mut egui::Ui, show_tree: &mut bool) {
 /// Цвет иконки папки в дереве (как у Charles — голубой).
 const FOLDER: Color32 = Color32::from_rgb(0x6F, 0xB3, 0xE0);
 
+/// Треугольник разворота/сворачивания — рисуем сами (в шрифте нет ▶/▼).
+fn paint_arrow(ui: &mut egui::Ui, open: bool) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
+    let c = rect.center();
+    let pts = if open {
+        vec![
+            c + egui::vec2(-3.6, -1.8),
+            c + egui::vec2(3.6, -1.8),
+            c + egui::vec2(0.0, 2.8),
+        ]
+    } else {
+        vec![
+            c + egui::vec2(-1.8, -3.6),
+            c + egui::vec2(2.8, 0.0),
+            c + egui::vec2(-1.8, 3.6),
+        ]
+    };
+    ui.painter()
+        .add(egui::Shape::convex_polygon(pts, DIM, egui::Stroke::NONE));
+}
+
 /// Строка-файл в дереве Structure: иконка, имя, счётчик справа.
 fn file_row(
     ui: &mut egui::Ui,
@@ -635,6 +657,11 @@ impl Row {
             req_body: Self::body_str(&ex.request_body),
             resp_body: resp.cloned().and_then(|b| Self::body_str(&Some(b))),
             content_type: ex.response_content_type.clone(),
+            content_encoding: ex
+                .response_headers
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("content-encoding"))
+                .map(|(_, v)| v.clone()),
         }
     }
 
@@ -1793,20 +1820,36 @@ Install it once and browsers will trust captured traffic.",
         }
 
         let id = ui.make_persistent_id(("node", t.host.clone(), path.clone()));
-        let state =
-            egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false);
-        state
-            .show_header(ui, |ui| {
-                ui.add(icon_img("folder")
-                    .tint(FOLDER)
-                    .fit_to_exact_size(egui::vec2(13.0, 13.0)));
-                ui.label(RichText::new(node.name.clone())
-                    .color(if selected { Color32::WHITE } else { TEXT }));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.weak(RichText::new(node.count.to_string()).color(DIM));
-                });
-            })
-            .body(|ui| {
+        let open = ui.data_mut(|d| d.get_persisted::<bool>(id)).unwrap_or(false);
+
+        // Кликабельна ВСЯ строка папки, а не только треугольник.
+        let row = ui.horizontal(|ui| {
+            paint_arrow(ui, open);
+            ui.add(icon_img("folder")
+                .tint(FOLDER)
+                .fit_to_exact_size(egui::vec2(13.0, 13.0)));
+            ui.label(RichText::new(node.name.clone())
+                .color(if selected { Color32::WHITE } else { TEXT }));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.weak(RichText::new(node.count.to_string()).color(DIM));
+            });
+        });
+        let hit = ui.interact(
+            row.response.rect.expand2(egui::vec2(0.0, 1.0)),
+            id.with("row"),
+            egui::Sense::click(),
+        );
+        if hit.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        let mut is_open = open;
+        if hit.clicked() {
+            is_open = !open;
+            ui.data_mut(|d| d.insert_persisted(id, is_open));
+        }
+
+        if is_open {
+            ui.indent(id.with("body"), |ui| {
                 // Прямой запрос на саму папку — показываем как «/», как делает Charles.
                 if node.leaf {
                     file_row(ui, t, "/", &path, 1, false, clicked);
@@ -1815,6 +1858,7 @@ Install it once and browsers will trust captured traffic.",
                     self.node_row(ui, t, child, path.clone(), clicked);
                 }
             });
+        }
     }
 
     /// Пустой экран: объясняет, почему трафика нет, и даёт кнопки починить.
@@ -2087,6 +2131,7 @@ must be pointed to http://127.0.0.1:8888 themselves.")
                 let mut clicked = None;
                 for r in &rows {
                     let sel = sel_row == Some(r.id);
+                    let row_top = ui.cursor().top();
 
                     // Как в Charles: новая строка на секунду подсвечивается и плавно гаснет.
                     const FLASH: f32 = 0.9;
@@ -2120,6 +2165,18 @@ must be pointed to http://127.0.0.1:8888 themselves.")
                     if ui.selectable_label(sel, RichText::new(r.time.as_str()).color(DIM)).clicked() { clicked = Some(r.id); }
                     if ui.selectable_label(sel, RichText::new(r.duration.as_str()).color(DIM)).clicked() { clicked = Some(r.id); }
                     ui.end_row();
+
+                    // Клик по любому месту строки (а не только по тексту ячейки) выбирает её.
+                    let row_rect = egui::Rect::from_min_max(
+                        egui::pos2(ui.max_rect().left(), row_top),
+                        egui::pos2(ui.max_rect().right(), ui.cursor().top()),
+                    );
+                    if ui
+                        .interact(row_rect, egui::Id::new(("seq_row", r.id)), egui::Sense::click())
+                        .clicked()
+                    {
+                        clicked = Some(r.id);
+                    }
                 }
                 clicked
             });
@@ -2179,6 +2236,16 @@ must be pointed to http://127.0.0.1:8888 themselves.")
                         ui.monospace(RichText::new(format!("{k}: {v}")).color(TEXT));
                     }
                     section(ui, "Body");
+                    // Сжатие (gzip/deflate/br/zstd) — показываем, что тело распаковано.
+                    if let Some(enc) = &r.content_encoding {
+                        let note = if r.resp_body.is_some() {
+                            format!("Compression detected: {enc} — body decompressed for display")
+                        } else {
+                            format!("Compression detected: {enc} — could not decompress")
+                        };
+                        ui.label(RichText::new(note).color(ORANGE));
+                        ui.add_space(2.0);
+                    }
                     if self.body_pretty && r.is_json() {
                         if let Some(text) = &r.resp_body {
                             if let Ok(v) = serde_json::from_str::<serde_json::Value>(text) {
