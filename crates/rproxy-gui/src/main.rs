@@ -433,6 +433,8 @@ fn icon_img(name: &str) -> egui::Image<'static> {
         "gear" => ("bytes://icon-gear.svg", include_bytes!("../assets/icons/gear.svg")),
         "bolt" => ("bytes://icon-bolt.svg", include_bytes!("../assets/icons/bolt.svg")),
         "deny" => ("bytes://icon-deny.svg", include_bytes!("../assets/icons/deny.svg")),
+        "folder" => ("bytes://icon-folder.svg", include_bytes!("../assets/icons/folder.svg")),
+        "file" => ("bytes://icon-file.svg", include_bytes!("../assets/icons/file.svg")),
         _ => ("bytes://icon-globe.svg", include_bytes!("../assets/icons/globe.svg")),
     };
     egui::Image::from_bytes(uri, bytes).fit_to_exact_size(egui::vec2(16.0, 16.0))
@@ -478,6 +480,34 @@ fn segmented_view_switch(ui: &mut egui::Ui, show_tree: &mut bool) {
                 }
             });
         });
+}
+
+/// Цвет иконки папки в дереве (как у Charles — голубой).
+const FOLDER: Color32 = Color32::from_rgb(0x6F, 0xB3, 0xE0);
+
+/// Строка-файл в дереве Structure: иконка, имя, счётчик справа.
+fn file_row(
+    ui: &mut egui::Ui,
+    t: &TreeRoot,
+    name: &str,
+    path: &str,
+    count: u32,
+    selected: bool,
+    clicked: &mut Option<(String, String)>,
+) {
+    ui.horizontal(|ui| {
+        ui.add(icon_img("file")
+            .tint(if selected { Color32::WHITE } else { TEXT })
+            .fit_to_exact_size(egui::vec2(12.0, 12.0)));
+        let label = RichText::new(name.to_string())
+            .color(if selected { Color32::WHITE } else { TEXT });
+        if ui.selectable_label(selected, label).clicked() {
+            *clicked = Some((t.host.clone(), path.to_string()));
+        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.weak(RichText::new(count.to_string()).color(DIM));
+        });
+    });
 }
 
 /// Вкладка в стиле Charles: активная — белым с синей подчёркивающей линией.
@@ -1749,38 +1779,42 @@ Install it once and browsers will trust captured traffic.",
         clicked: &mut Option<(String, String)>,
     ) {
         let path = format!("{prefix}/{}", node.name);
-        let node_id = format!("{}|{}", t.host, path);
-        let is_leaf = node.children.is_empty() || node.leaf;
         let selected = self
             .sel_host
             .as_ref()
             .map_or(false, |(h, p)| h == &t.host && p == &path);
 
-        if is_leaf {
-            // Счётчик — справа на той же строке (раньше он падал на отдельную строку).
-            ui.horizontal(|ui| {
-                let label = RichText::new(node.name.clone())
-                    .color(if selected { Color32::WHITE } else { TEXT });
-                if ui.selectable_label(selected, label).clicked() {
-                    *clicked = Some((t.host.clone(), path));
-                }
+        // Узел — ПАПКА, если у него есть дочерние элементы (даже когда на этот же
+        // путь был и прямой запрос). Раньше флаг node.leaf делал папку файлом,
+        // и она не раскрывалась.
+        if node.children.is_empty() {
+            file_row(ui, t, &node.name, &path, node.count, selected, clicked);
+            return;
+        }
+
+        let id = ui.make_persistent_id(("node", t.host.clone(), path.clone()));
+        let state =
+            egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false);
+        state
+            .show_header(ui, |ui| {
+                ui.add(icon_img("folder")
+                    .tint(FOLDER)
+                    .fit_to_exact_size(egui::vec2(13.0, 13.0)));
+                ui.label(RichText::new(node.name.clone())
+                    .color(if selected { Color32::WHITE } else { TEXT }));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.weak(RichText::new(node.count.to_string()).color(DIM));
                 });
-            });
-        } else {
-            egui::CollapsingHeader::new(
-                RichText::new(format!("{} ({})", node.name, node.count))
-                    .color(if selected { Color32::WHITE } else { TEXT }),
-            )
-            .id_salt(node_id)
-            .show(ui, |ui| {
-                // Без кнопок внутри папки — как в Charles, только раскрытие/сворачивание.
+            })
+            .body(|ui| {
+                // Прямой запрос на саму папку — показываем как «/», как делает Charles.
+                if node.leaf {
+                    file_row(ui, t, "/", &path, 1, false, clicked);
+                }
                 for child in &node.children {
                     self.node_row(ui, t, child, path.clone(), clicked);
                 }
             });
-        }
     }
 
     /// Пустой экран: объясняет, почему трафика нет, и даёт кнопки починить.
