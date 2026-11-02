@@ -6,6 +6,7 @@ pub mod events;
 pub mod model;
 pub mod net;
 pub mod pipeline;
+pub mod pretty;
 pub mod ssl_proxy;
 pub mod tools;
 

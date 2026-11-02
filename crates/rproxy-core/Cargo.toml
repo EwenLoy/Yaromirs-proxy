@@ -20,6 +20,7 @@ flate2 = "1"
 brotli = "7"
 zstd = "0.13"
 serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
 toml = "0.8"
 
 [dev-dependencies]

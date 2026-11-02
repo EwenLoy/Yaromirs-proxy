@@ -2224,6 +2224,20 @@ must be pointed to http://127.0.0.1:8888 themselves.")
                     }
                     section(ui, "Body");
                     if let Some(b) = &r.req_body {
+                        if self.body_pretty {
+                            let ct = r
+                                .req_headers
+                                .iter()
+                                .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+                                .map(|(_, v)| v.clone());
+                            if let Some((lang, pretty)) =
+                                rproxy_core::pretty::pretty_print(ct.as_deref(), b)
+                            {
+                                ui.label(RichText::new(format!("Formatted as {}", lang.name())).color(DIM));
+                                ui.monospace(pretty);
+                                return;
+                            }
+                        }
                         ui.monospace(b.as_str());
                     } else {
                         ui.weak("(пусто)");
@@ -2246,10 +2260,20 @@ must be pointed to http://127.0.0.1:8888 themselves.")
                         ui.label(RichText::new(note).color(ORANGE));
                         ui.add_space(2.0);
                     }
-                    if self.body_pretty && r.is_json() {
+                    if self.body_pretty {
                         if let Some(text) = &r.resp_body {
-                            if let Ok(v) = serde_json::from_str::<serde_json::Value>(text) {
-                                Self::json_tree(ui, "json", &v, 0);
+                            // JSON — деревом (удобнее), остальное — форматтером.
+                            if r.is_json() {
+                                if let Ok(v) = serde_json::from_str::<serde_json::Value>(text) {
+                                    Self::json_tree(ui, "json", &v, 0);
+                                    return;
+                                }
+                            }
+                            if let Some((lang, pretty)) =
+                                rproxy_core::pretty::pretty_print(r.content_type.as_deref(), text)
+                            {
+                                ui.label(RichText::new(format!("Formatted as {}", lang.name())).color(DIM));
+                                ui.monospace(pretty);
                                 return;
                             }
                         }
