@@ -421,11 +421,61 @@ fn icon_img(name: &str) -> egui::Image<'static> {
         "deny" => ("bytes://icon-deny.svg", include_bytes!("../assets/icons/deny.svg")),
         _ => ("bytes://icon-globe.svg", include_bytes!("../assets/icons/globe.svg")),
     };
-    egui::Image::from_bytes(uri, bytes).fit_to_exact_size(egui::vec2(18.0, 18.0))
+    egui::Image::from_bytes(uri, bytes).fit_to_exact_size(egui::vec2(16.0, 16.0))
 }
 
 fn icon_button(ui: &mut egui::Ui, name: &str, tint: Color32, tip: &str) -> egui::Response {
     ui.add(egui::ImageButton::new(icon_img(name).tint(tint))).on_hover_text(tip)
+}
+
+/// Кнопка сегментированного переключателя: активная — синяя плашка,
+/// остальные — только иконка, при наведении подсветка. Так видно,
+/// что это переключатель, а не две отдельные кнопки.
+fn seg_button(ui: &mut egui::Ui, name: &str, active: bool, tip: &str) -> egui::Response {
+    let size = egui::vec2(28.0, 21.0);
+    let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
+    if active {
+        ui.painter().rect_filled(rect.shrink(1.0), 3.0, SELECT);
+    } else if resp.hovered() {
+        ui.painter().rect_filled(rect.shrink(1.0), 3.0, HOVER);
+    }
+    icon_img(name)
+        .tint(if active { Color32::WHITE } else { DIM })
+        .fit_to_exact_size(egui::vec2(13.0, 13.0))
+        .paint_at(ui, egui::Rect::from_center_size(rect.center(), egui::vec2(13.0, 13.0)));
+    resp.on_hover_text(tip)
+}
+
+/// Собирает переключатель в общий «стакан» — как сегмент в Charles.
+fn segmented_view_switch(ui: &mut egui::Ui, show_tree: &mut bool) {
+    egui::Frame::none()
+        .fill(Color32::from_rgb(0x2A, 0x2A, 0x2A))
+        .stroke(egui::Stroke::new(1.0, MENU_BORDER))
+        .rounding(4.0)
+        .inner_margin(egui::Margin::same(1.0))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 1.0;
+                if seg_button(ui, "list", !*show_tree, "Sequence view — плоский список запросов").clicked() {
+                    *show_tree = false;
+                }
+                if seg_button(ui, "tree", *show_tree, "Structure view — дерево хостов").clicked() {
+                    *show_tree = true;
+                }
+            });
+        });
+}
+
+/// Вкладка в стиле Charles: активная — белым с синей подчёркивающей линией.
+fn tab_button(ui: &mut egui::Ui, label: &str, active: bool) -> egui::Response {
+    let text = egui::RichText::new(label).color(if active { Color32::WHITE } else { DIM });
+    let resp = ui.add(egui::Button::new(text).frame(false));
+    if active {
+        let r = resp.rect;
+        ui.painter()
+            .hline(r.x_range(), r.bottom() + 3.0, egui::Stroke::new(2.0, SELECT));
+    }
+    resp
 }
 
 /// Цветная точка статуса: ok = зелёная, warn = оранжевая, иначе красная.
@@ -982,16 +1032,11 @@ impl App {
         ).show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 3.0;
+                ui.spacing_mut().button_padding = egui::vec2(5.0, 3.0);
 
-                // --- Вид сессии: список / дерево ---
-                if icon_button(ui, "list", if self.show_tree { DIM } else { TEXT },
-                    "Sequence view — только список запросов").clicked() {
-                    self.show_tree = false;
-                }
-                if icon_button(ui, "tree", if self.show_tree { TEXT } else { DIM },
-                    "Structure view — дерево хостов").clicked() {
-                    self.show_tree = true;
-                }
+                // --- Вид сессии: компактный переключатель ---
+                segmented_view_switch(ui, &mut self.show_tree);
+                ui.add_space(4.0);
                 ui.separator();
 
                 // --- Сессия ---
@@ -1637,8 +1682,16 @@ Install it once and browsers will trust captured traffic.",
     fn host_tree(&mut self, ui: &mut egui::Ui, t: &TreeRoot) {
         let selected = self.sel_host.as_ref().map_or(false, |(h, _)| h == &t.host);
         ui.horizontal(|ui| {
+            // SSL-хосты — зелёный замок, обычный HTTP — серый глобус (как в Charles).
+            let icon_tint = if selected {
+                Color32::WHITE
+            } else if t.secure {
+                Color32::from_rgb(0x4C, 0xB0, 0x6B)
+            } else {
+                DIM
+            };
             ui.add(icon_img(if t.secure { "lock" } else { "globe" })
-                .tint(if selected { Color32::WHITE } else { DIM })
+                .tint(icon_tint)
                 .fit_to_exact_size(egui::vec2(13.0, 13.0)));
             let label = RichText::new(t.host.clone())
                 .color(if selected { Color32::WHITE } else { TEXT });
@@ -1986,7 +2039,13 @@ must be pointed to http://127.0.0.1:8888 themselves.")
                     let sel = sel_row == Some(r.id);
 
                     ui.add(icon_img(if r.locked { "lock" } else { "globe" })
-                        .tint(if sel { Color32::WHITE } else { DIM })
+                        .tint(if sel {
+                            Color32::WHITE
+                        } else if r.locked {
+                            Color32::from_rgb(0x4C, 0xB0, 0x6B)
+                        } else {
+                            DIM
+                        })
                         .fit_to_exact_size(egui::vec2(13.0, 13.0)));
                     let mc = Row::method_color(&r.method);
                     if ui.selectable_label(sel, RichText::new(r.method.as_str()).color(Color32::WHITE).background_color(mc)).clicked() { clicked = Some(r.id); }
@@ -2007,8 +2066,11 @@ must be pointed to http://127.0.0.1:8888 themselves.")
 
     fn detail(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 14.0;
             for (t, l) in [(Tab::Overview, "Overview"), (Tab::Request, "Request"), (Tab::Response, "Response"), (Tab::Timing, "Timing")] {
-                if ui.selectable_label(self.tab == t, l).clicked() { self.tab = t; }
+                if tab_button(ui, l, self.tab == t).clicked() {
+                    self.tab = t;
+                }
             }
             if matches!(self.tab, Tab::Request | Tab::Response) {
                 ui.separator();
