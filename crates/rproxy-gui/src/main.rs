@@ -59,7 +59,9 @@ fn main() -> eframe::Result<()> {
         },
         Box::new(move |cc| {
             egui_extras::install_image_loaders(&cc.egui_ctx);
-            cc.egui_ctx.set_pixels_per_point(1.15);
+            // Без искусственного масштаба: при set_pixels_per_point(1.15) SVG-иконки
+            // растеризуются в 16 px и растягиваются до 18.4 — отсюда «мыло».
+            // Крупнее делаем шрифтами (см. setup_style), а не масштабом всего UI.
             setup_style(&cc.egui_ctx);
             Ok(Box::new(App::new(
                 rx, tx, bus, port, bp_hub, ssl_ui, listening, bind_error, win_proxy, autotake,
@@ -204,12 +206,24 @@ fn setup_style(ctx: &egui::Context) {
     // узкому пункту (justified-layout в egui 0.26+ авто-подгоняет ширину под
     // контент), из-за чего попап выглядит "квадратным"/тесным, не как в Charles.
     style.spacing.menu_width = 180.0;
+
+    // Размер шрифтов вместо глобального масштаба UI (масштаб размывал иконки).
+    style.text_styles = [
+        (egui::TextStyle::Heading, egui::FontId::new(22.0, egui::FontFamily::Proportional)),
+        (egui::TextStyle::Body, egui::FontId::new(15.0, egui::FontFamily::Proportional)),
+        (egui::TextStyle::Monospace, egui::FontId::new(14.0, egui::FontFamily::Monospace)),
+        (egui::TextStyle::Button, egui::FontId::new(15.0, egui::FontFamily::Proportional)),
+        (egui::TextStyle::Small, egui::FontId::new(12.0, egui::FontFamily::Proportional)),
+    ]
+    .into();
     ctx.set_style(style);
 }
 
 #[derive(Clone)]
 struct Row {
     id: u32,
+    /// Когда строка появилась — для «вспышки» новой строки, как в Charles.
+    born: std::time::Instant,
     locked: bool,
     method: String,
     host: String,
@@ -581,6 +595,7 @@ impl Row {
         let resp = ex.response_body_decoded.as_ref().or(ex.response_body.as_ref());
         Self {
             id: ex.id.0 as u32,
+            born: std::time::Instant::now(),
             locked, method, host, path,
             status: ex.response_status.unwrap_or(0),
             time: now_str(),
@@ -1760,10 +1775,7 @@ Install it once and browsers will trust captured traffic.",
             )
             .id_salt(node_id)
             .show(ui, |ui| {
-                // клик по заголовку папки = фильтр по префиксу
-                if ui.small_button("only this path").clicked() {
-                    *clicked = Some((t.host.clone(), path.clone()));
-                }
+                // Без кнопок внутри папки — как в Charles, только раскрытие/сворачивание.
                 for child in &node.children {
                     self.node_row(ui, t, child, path.clone(), clicked);
                 }
@@ -2041,6 +2053,20 @@ must be pointed to http://127.0.0.1:8888 themselves.")
                 let mut clicked = None;
                 for r in &rows {
                     let sel = sel_row == Some(r.id);
+
+                    // Как в Charles: новая строка на секунду подсвечивается и плавно гаснет.
+                    const FLASH: f32 = 0.9;
+                    let age = r.born.elapsed().as_secs_f32();
+                    if age < FLASH {
+                        let k = 1.0 - (age / FLASH);
+                        let c = Color32::from_rgba_unmultiplied(0x2F, 0x6F, 0xED, (85.0 * k) as u8);
+                        let band = egui::Rect::from_min_size(
+                            ui.cursor().min,
+                            egui::vec2(ui.available_width(), 19.0),
+                        );
+                        ui.painter().rect_filled(band, 2.0, c);
+                        ui.ctx().request_repaint();
+                    }
 
                     ui.add(icon_img(if r.locked { "lock" } else { "globe" })
                         .tint(if sel {
