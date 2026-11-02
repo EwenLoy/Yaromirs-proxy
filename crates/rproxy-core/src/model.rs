@@ -111,6 +111,8 @@ pub struct Exchange {
     pub timing: Timing,
     pub started_wall: Option<std::time::SystemTime>,
     pub error: Option<String>,
+    /// Заметки уровня Charles Notes (напр. «SSL Proxying not enabled for this host»).
+    pub notes: Option<String>,
 }
 
 impl Exchange {
@@ -130,6 +132,7 @@ impl Exchange {
             timing: Timing::start(),
             started_wall: Some(std::time::SystemTime::now()),
             error: None,
+            notes: None,
         }
     }
 }

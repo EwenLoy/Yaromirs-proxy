@@ -6,6 +6,7 @@ pub mod events;
 pub mod model;
 pub mod net;
 pub mod pipeline;
+pub mod ssl_proxy;
 pub mod tools;
 
 pub use breakpoints::{BreakpointDecision, BreakpointHub};
@@ -19,3 +20,4 @@ pub use net::ProxyServer;
 pub use pipeline::{
     InterceptAction, Pipeline, RequestInterceptor, ResponseInterceptor,
 };
+pub use ssl_proxy::{pattern_matches, SslProxyConfig};

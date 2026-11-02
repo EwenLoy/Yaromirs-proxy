@@ -28,6 +28,7 @@ use crate::model::{
     Protocol,
 };
 use crate::pipeline::{InterceptAction, Pipeline};
+use crate::ssl_proxy::SslProxyConfig;
 
 type RespBody = Either<Incoming, Full<Bytes>>;
 type HyperResponse = hyper::Response<RespBody>;
@@ -157,6 +158,7 @@ struct ProxyState {
     next_exchange_id: AtomicU64,
     next_connection_id: AtomicU64,
     mitm: Option<Arc<MitmState>>,
+    ssl_proxy: Arc<std::sync::RwLock<SslProxyConfig>>,
     breakpoints: Arc<crate::breakpoints::BreakpointHub>,
 }
 
@@ -171,6 +173,7 @@ pub struct ProxyServer {
     bus: EventBus,
     pipeline: Arc<Pipeline>,
     mitm: Option<Arc<MitmState>>,
+    ssl_proxy: Arc<std::sync::RwLock<SslProxyConfig>>,
     breakpoints: Arc<crate::breakpoints::BreakpointHub>,
 }
 
@@ -186,8 +189,14 @@ impl ProxyServer {
             bus,
             pipeline: Arc::new(pipeline),
             mitm: None,
+            ssl_proxy: Arc::new(std::sync::RwLock::new(SslProxyConfig::default())),
             breakpoints: Arc::new(crate::breakpoints::BreakpointHub::default()),
         }
+    }
+
+    /// Поделиться конфигом SSL-локаций с UI (хот-релоад из диалога настроек).
+    pub fn ssl_proxy_config(&self) -> Arc<std::sync::RwLock<SslProxyConfig>> {
+        self.ssl_proxy.clone()
     }
 
     /// Включить MITM-перехват HTTPS (загрузка/генерация CA).
@@ -229,6 +238,7 @@ impl ProxyServer {
             next_exchange_id: AtomicU64::new(1),
             next_connection_id: AtomicU64::new(1),
             mitm: self.mitm,
+            ssl_proxy: self.ssl_proxy,
             breakpoints: self.breakpoints,
         });
 
@@ -326,6 +336,19 @@ fn build_hyper_response(m: &HttpResponse) -> HyperResponse {
 }
 
 
+/// Разбор `host:port` из CONNECT-authority (дефолт порта 443).
+fn parse_host_port(authority: &str) -> (String, u16) {
+    // IPv6 вида [::1]:443 — берём после последней ':'.
+    match authority.rsplit_once(':') {
+        Some((h, p)) if !p.contains(']') => {
+            let host = h.trim_start_matches('[').trim_end_matches(']').to_string();
+            let port = p.parse::<u16>().unwrap_or(443);
+            (host, port)
+        }
+        _ => (authority.trim_start_matches('[').trim_end_matches(']').to_string(), 443),
+    }
+}
+
 fn finish_exchange(state: &ProxyState, mut exchange: Exchange, state_: ExchangeState) {
     exchange.state = state_;
     exchange.timing.completed_at = Some(Instant::now());
@@ -356,17 +379,41 @@ async fn handle_connect(
     state: Arc<ProxyState>,
     conn_id: ConnectionId,
 ) -> ServiceResult {
-    // MITM-ветка: расшифровываем HTTPS, если включён.
-    if let Some(mitm) = state.mitm.clone() {
-        return handle_connect_mitm(req, state, conn_id, mitm).await;
-    }
-    // Passthrough-ветка (M0): туннель без расшифровки.
     let authority = req
         .uri()
         .authority()
         .map(|a| a.as_str())
         .unwrap_or("")
         .to_string();
+    let (host_only, port) = parse_host_port(&authority);
+    // MITM-ветка: расшифровываем HTTPS, если включён И хост в SSL-локациях.
+    if let Some(mitm) = state.mitm.clone() {
+        let want_mitm = state
+            .ssl_proxy
+            .read()
+            .map(|cfg| cfg.should_mitm(&host_only, port))
+            .unwrap_or(true);
+        if want_mitm {
+            return handle_connect_mitm(req, state, conn_id, mitm).await;
+        }
+        // Хоста нет в SSL-локациях: туннель + Notes как у Charles.
+        let exchange_id = state.new_exchange_id();
+        let mut exchange = Exchange::new(exchange_id, conn_id, Protocol::ConnectTunnel);
+        exchange.request = Some(HttpRequest {
+            method: "CONNECT".into(),
+            uri: authority.clone(),
+            headers: Vec::new(),
+            is_connect: true,
+        });
+        exchange.notes = Some(
+            "SSL Proxying not enabled for this host: enable in Proxy Settings, SSL locations"
+                .to_string(),
+        );
+        state.bus.publish(ProxyEvent::ExchangeStarted(exchange.clone()));
+        exchange.error = Some("passthrough: host not in SSL locations".into());
+        finish_exchange(&state, exchange, ExchangeState::Complete);
+    }
+    // Passthrough-ветка (M0): туннель без расшифровки.
 
     let exchange_id = state.new_exchange_id();
     let mut exchange = Exchange::new(exchange_id, conn_id, Protocol::ConnectTunnel);

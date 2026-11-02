@@ -9,6 +9,7 @@ rproxy-cert = { path = "../rproxy-cert" }
 rproxy-export = { path = "../rproxy-export" }
 eframe.workspace = true
 egui.workspace = true
+egui_extras = { version = "0.29", features = ["svg"] }
 tokio.workspace = true
 rfd = "0.15"
 bytes.workspace = true

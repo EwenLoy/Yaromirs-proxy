@@ -456,3 +456,58 @@ rproxy replay session.rpz --repeat 5 --delay 200ms           # аналог Repe
 - GUI в стиле Charles: меню-бар, иконочный тулбар, дерево хостов с Encrypted-группой,
   Filter внизу панели, статус-бар «Recording». Тела запросов/ответов — с M2.
 - MCP-этап M2.5 вставлен после захвата тел (см. §2.1, §9): без тел MCP-тулам читать нечего.
+- Ошибка компиляции E0382 в GUI (`bind_result` move) исправлена: сначала
+  `as_ref().err()`, потом `.ok()`; в статус-бар добавлен индикатор
+  «Listening on 127.0.0.1:PORT» / «Not listening».
+
+---
+
+## 12. Паритет с Charles 5.2.1: системный прокси, меню Proxy, нативные окна
+
+Легенда: ✅ выполнено · ❌ не выполнено · 🔧 выполнено частично (требует переделки)
+
+### 12.1 Системный прокси Windows (формат Charles)
+- ✅ `ProxyServer` в формате `http=127.0.0.1:{port};https=127.0.0.1:{port}`.
+- ✅ `ProxyOverride=<local>` при включении.
+- ✅ Честное уведомление WinINET: прямой FFI `InternetSetOptionA` (39/37),
+  без новых крейтов; фейковый `rundll32`-вызов удалён.
+- ✅ Снапшот `ProxyEnable/ProxyServer/ProxyOverride` через `reg query`
+  перед первым включением; restore при снятии галки И при закрытии приложения
+  (`close_requested` → `restore_proxy_on_exit`).
+- ❌ Сверить галку «Windows proxy» с реальным реестром при открытии меню.
+
+### 12.2 SSL-локации в движке (ядро для диалога настроек)
+- ✅ MITM на все хосты безусловно (`with_mitm()` в GUI/CLI) — осталось дефолтом.
+- ✅ `SslProxyConfig { enabled, include, exclude }` на `Arc<RwLock>` (хот-релоад).
+- ✅ Матчер паттернов Charles (`*:*`, `*`, `*.example.com:*`, `host:443`) + unit-тест
+  (`ssl_locations_test`, 3 теста зелёные).
+- ✅ В `handle_connect`: MITM/passthrough по фильтру; дефолт `enabled=true, include=["*:*"]`.
+- ✅ Поле `notes` в `Exchange` («SSL Proxying not enabled for this host» для туннелей мимо фильтра).
+
+### 12.3 Меню Proxy (паритет с Charles)
+- ✅ Start/Stop recording — было, осталось.
+- ✅ Start/Stop SSL proxying — живой тумблер `SslProxyConfig.enabled`;
+  мёртвая галка `ssl_hint` удалена.
+- ✅ Enable breakpoints — чекбокс в меню на `bp_on`/`bp_hub`.
+- ✅ Окна: Recording settings… / SSL proxying settings… /
+  Proxy settings… / Breakpoints settings… (см. 12.4).
+- ⏭️ Вне скоупа (M7–M8, заглушек не делаем): Throttling, Reverse proxies,
+  Port forwarding, DNS, Access control, External proxies, Web interface.
+
+### 12.4 Нативные окна ОС вместо якорных `egui::Window`
+Механизм: `ctx.show_viewport_immediate()`, у каждого окна свой заголовок/крестик/Done/Cancel.
+- ✅ Новое: SSL proxying settings (вкладки SSL proxying + Root certificate;
+  Server/Client certificates — только инфо-текст: вкладки-заглушки НЕ делаем, только 2 рабочие).
+- ✅ Новое: Recording settings (Include/Exclude захвата, применяется в `poll()`).
+- ✅ Новое: Proxy settings (порт, статус listener'а, копирование адреса).
+- ✅ Переведены: About, Install root certificate, Breakpoints
+  (старые якорные `install_window`/`breakpoints_window` удалены).
+- ✅ Статус-бар: Listening-индикатор добавлен; Recording-индикатор есть.
+
+### 12.5 Верификация
+- ✅ `cargo build --workspace` / `cargo test --workspace` зелёные (exit 0).
+- ❌ curl-матрица: HTTP через прокси → строка; HTTPS → MITM-строка с телом;
+  SSL OFF → туннель + Notes; галка → `reg query` с per-protocol строкой;
+  закрытие app с галкой → restore исходных значений.
+- ❌ Браузеры: новый Chrome — трафик; Firefox — только «Use system proxy»;
+  Edge — проверка loopback. (Предусловие HTTPS: CA установлен.)
