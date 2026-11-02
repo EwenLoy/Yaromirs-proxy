@@ -347,6 +347,8 @@ struct App {
     about: bool,
     install_win: bool,
     install_msg: Option<String>,
+    /// Кэш проверки «CA в доверенных» (None = ещё не проверяли).
+    ca_trusted: Option<bool>,
     listening: bool,
     bind_error: Option<String>,
     win_proxy: bool,
@@ -603,7 +605,7 @@ impl App {
             recording: true, filter: String::new(), sel_host: None,
             tab: Tab::Overview, sel_row: None, body_pretty: true, rows: Vec::new(),
             trees: Vec::new(), exchanges: Vec::new(), about: false,
-            install_win: false, install_msg: None,
+            install_win: false, install_msg: None, ca_trusted: None,
             listening, bind_error, win_proxy, proxy_msg: None,
             show_tree: true, sys_on: false, sys_proxy: None,
             last_proxy_poll: std::time::Instant::now(),
@@ -1204,61 +1206,172 @@ impl App {
         open
     }
 
+    /// Окно сертификата в духе Charles: крупное, со статусом доверия,
+    /// авто-установкой через UAC и понятной ручной инструкцией.
     fn install_dialog(&mut self, ctx: &egui::Context) -> bool {
         let mut open = true;
         let ca = ca_file();
+        if self.ca_trusted.is_none() {
+            self.ca_trusted = Some(ca_installed());
+        }
+        let installed = self.ca_trusted.unwrap_or(false);
+        let port = self.port;
+        let lan_ip = local_ipv4().map(|i| i.to_string()).unwrap_or_else(|| "<this computer's IP>".into());
+        let ca_path = ca.as_ref().ok().map(|p| p.display().to_string()).unwrap_or_default();
         let mut msg = self.install_msg.clone();
         let mut copy: Option<String> = None;
-        let mut auto: Option<std::path::PathBuf> = None;
+        let mut auto = false;
+        let mut save = false;
+        let mut recheck = false;
+
         ctx.show_viewport_immediate(
             egui::ViewportId::from_hash_of("Install root certificate"),
             egui::ViewportBuilder::default()
-                .with_title("Install root certificate")
-                .with_inner_size([520.0, 380.0]),
+                .with_title("Root certificate — rproxy")
+                .with_inner_size([720.0, 660.0])
+                .with_min_inner_size([620.0, 560.0]),
             |ctx, _| {
-                egui::CentralPanel::default().show(ctx, |ui| {
-                    card(ui, "Charles Clone Root CA", |ui| {
-                        match &ca {
-                            Ok(path) => {
-                                ui.horizontal(|ui| {
-                                    ui.weak("File:");
-                                    ui.monospace(path.display().to_string());
-                                });
-                            }
-                            Err(e) => {
-                                ui.colored_label(RED, format!("CA not found: {e}"));
-                            }
-                        }
-                        if let Some(m) = &msg {
-                            ui.add_space(4.0);
-                            ui.label(RichText::new(m.clone()).color(GREEN));
-                        }
+                if ctx.input(|i| i.viewport().close_requested()) {
+                    open = false;
+                }
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::default().fill(BG).inner_margin(egui::Margin::same(18.0)))
+                    .show(ctx, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.add(icon_img("lock")
+                                .tint(if installed { GREEN } else { ORANGE })
+                                .fit_to_exact_size(egui::vec2(40.0, 40.0)));
+                            ui.add_space(6.0);
+                            ui.vertical(|ui| {
+                                ui.label(RichText::new("rproxy Root Certificate").size(22.0).strong());
+                                if installed {
+                                    ui.label(RichText::new("Trusted on this computer").color(GREEN).strong());
+                                } else {
+                                    ui.label(RichText::new(
+                                        "Not installed — browsers warn on every HTTPS site",
+                                    ).color(ORANGE).strong());
+                                }
+                            });
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                                if ui.button("Refresh status").clicked() {
+                                    recheck = true;
+                                }
+                            });
+                        });
                         ui.add_space(6.0);
-                        if let Ok(path) = &ca {
-                            if ui.button("Auto install (adds to Trusted Root via UAC)").clicked() {
-                                auto = Some(path.clone());
-                            }
-                            if ui.button("Copy path").clicked() {
-                                copy = Some(path.display().to_string());
-                                msg = Some("Path copied".into());
-                            }
-                        }
+                        ui.label(RichText::new(
+                            "rproxy decrypts HTTPS by signing certificates with its own root CA. \
+Install it once and browsers will trust captured traffic.",
+                        ).color(DIM));
+                        ui.add_space(12.0);
+
+                        egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+                            card(ui, "1 · Install on this computer", |ui| {
+                                if installed {
+                                    ui.label(RichText::new(
+                                        "The certificate is already in the Trusted Root store.",
+                                    ).color(GREEN));
+                                    ui.add_space(4.0);
+                                }
+                                let label = if installed { "Reinstall certificate" } else { "Install certificate" };
+                                let btn = egui::Button::new(RichText::new(label).strong().color(Color32::WHITE))
+                                    .fill(SELECT)
+                                    .rounding(4.0)
+                                    .min_size(egui::vec2(0.0, 30.0));
+                                if ui.add(btn).clicked() {
+                                    auto = true;
+                                }
+                                ui.add_space(4.0);
+                                ui.label(RichText::new(
+                                    "Windows will ask for administrator permission (UAC).",
+                                ).color(DIM));
+                                if let Some(m) = &msg {
+                                    ui.add_space(4.0);
+                                    ui.label(RichText::new(m.clone()).color(if installed { GREEN } else { TEXT }));
+                                }
+                            });
+                            ui.add_space(10.0);
+
+                            card(ui, "2 · Manual installation", |ui| {
+                                ui.label("1. Save the certificate to disk with the button below.");
+                                ui.label("2. Double-click the saved file → Install Certificate…");
+                                ui.label("3. Choose \"Local Machine\" → \"Place all certificates in the following store\".");
+                                ui.label("4. Pick \"Trusted Root Certification Authorities\" → Next → Finish.");
+                                ui.add_space(6.0);
+                                ui.horizontal(|ui| {
+                                    if ui.button("Save certificate…").clicked() {
+                                        save = true;
+                                    }
+                                    if ui.button("Copy path").clicked() {
+                                        copy = Some(ca_path.clone());
+                                    }
+                                });
+                                if !ca_path.is_empty() {
+                                    ui.add_space(2.0);
+                                    ui.monospace(RichText::new(ca_path.clone()).color(DIM));
+                                }
+                            });
+                            ui.add_space(10.0);
+
+                            card(ui, "3 · Phone or tablet", |ui| {
+                                ui.label(format!(
+                                    "1. In the device Wi-Fi settings set the proxy to {lan_ip}:{port}."
+                                ));
+                                ui.label("2. Send the .cer file to the device and install it as a root certificate.");
+                                ui.label("Android: Settings → Security → Encryption & credentials → Install a certificate → CA certificate.");
+                                ui.label("iOS: install the profile, then Settings → General → About → Certificate Trust Settings → enable full trust.");
+                            });
+                        });
+
+                        ui.add_space(10.0);
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(
+                                "After installing, restart the browser — it caches certificate decisions.",
+                            ).color(DIM));
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.button("Close").clicked() {
+                                    open = false;
+                                }
+                            });
+                        });
                     });
-                    ui.add_space(8.0);
-                    if ui.button("Close").clicked() {
-                        open = false;
-                    }
-                });
             },
         );
-        if let Some(p) = auto {
-            match install_ca_auto(&p) {
-                Ok(()) => self.install_msg = Some("Started: confirm the UAC prompt.".into()),
-                Err(e) => self.install_msg = Some(format!("Failed to start: {e}")),
-            }
-        } else if msg != self.install_msg {
-            self.install_msg = msg;
+
+        if recheck {
+            self.ca_trusted = Some(ca_installed());
+            msg = Some(if self.ca_trusted == Some(true) {
+                "Certificate found in Trusted Root.".into()
+            } else {
+                "Not found in Trusted Root yet — install it (UAC), then press Refresh status.".into()
+            });
         }
+        if save {
+            if let Ok(src) = ca_file() {
+                if let Some(dst) = rfd::FileDialog::new()
+                    .add_filter("Certificate", &["cer", "crt", "pem"])
+                    .set_file_name("rproxy-ca.cer")
+                    .save_file()
+                {
+                    msg = Some(match std::fs::copy(&src, &dst) {
+                        Ok(_) => format!("Saved to {}", dst.display()),
+                        Err(e) => format!("Save failed: {e}"),
+                    });
+                }
+            }
+        }
+        if auto {
+            match ca.as_ref() {
+                Ok(path) => match install_ca_auto(path) {
+                    Ok(()) => {
+                        msg = Some("UAC prompt opened — confirm it, then press \"Refresh status\".".into())
+                    }
+                    Err(e) => msg = Some(format!("Failed to start installer: {e}")),
+                },
+                Err(e) => msg = Some(format!("CA not found: {e}")),
+            }
+        }
+        self.install_msg = msg;
         if let Some(t) = copy {
             ctx.copy_text(t);
         }
@@ -2002,6 +2115,30 @@ fn ca_file() -> std::io::Result<std::path::PathBuf> {
         std::fs::copy(dir.join("ca.cert.pem"), &cer)?;
     }
     Ok(cer)
+}
+
+/// Наш CA уже в «Доверенных корневых сертификатах» этого компьютера?
+#[cfg(windows)]
+fn ca_installed() -> bool {
+    let Ok(out) = run_hidden("certutil", &["-store", "Root"]) else {
+        return false;
+    };
+    String::from_utf8_lossy(&out.stdout)
+        .to_lowercase()
+        .contains("charles clone root ca")
+}
+
+#[cfg(not(windows))]
+fn ca_installed() -> bool {
+    false
+}
+
+/// Локальный IPv4 этого компьютера (для инструкции «поставь прокси на телефоне»).
+/// UDP-сокет ничего не отправляет — connect лишь выбирает маршрут.
+fn local_ipv4() -> Option<std::net::IpAddr> {
+    let s = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    s.connect("8.8.8.8:80").ok()?;
+    s.local_addr().ok().map(|a| a.ip())
 }
 
 /// Auto: элевированный certutil добавляет CA в Trusted Root.

@@ -620,6 +620,10 @@ async fn handle_connect_mitm(
     });
     state.bus.publish(ProxyEvent::ExchangeStarted(exchange.clone()));
 
+    // Сертификат выпускаем на ЧИСТОЕ имя хоста (без ":443"): иначе CN/SAN не совпадает
+    // с именем сайта и браузер ругается ERR_CERT_COMMON_NAME_INVALID.
+    let (cert_host, _) = parse_host_port(&authority);
+
     let upgrade_fut = hyper::upgrade::on(req);
 
     tokio::spawn(async move {
@@ -639,7 +643,7 @@ async fn handle_connect_mitm(
             }
         };
 
-        let Some(server_cfg) = mitm.server_config_for(&authority) else {
+        let Some(server_cfg) = mitm.server_config_for(&cert_host) else {
             exchange.error = Some(format!("leaf cert for {authority} failed"));
             finish_exchange(&state, exchange, ExchangeState::Failed);
             return;
@@ -696,7 +700,13 @@ async fn forward_https_decrypted(
         .path_and_query()
         .map(|p| p.as_str().to_string())
         .unwrap_or_else(|| "/".to_string());
-    let uri_display = format!("https://{authority}{path}");
+    // URL для журнала: как у Charles — без ":443" у HTTPS по умолчанию.
+    let (disp_host, disp_port) = parse_host_port(&authority);
+    let uri_display = if disp_port == 443 {
+        format!("https://{disp_host}{path}")
+    } else {
+        format!("https://{authority}{path}")
+    };
 
     exchange.request = Some(HttpRequest {
         method: req.method().as_str().into(),
